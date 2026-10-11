@@ -1,0 +1,129 @@
+# Implementation notes
+
+Every place a paper leaves a choice open, what this repo chose, and why.
+
+Rule: if a choice could change a result, it goes in here before the run that uses it.
+
+This file feeds the paper's implementation appendix and its limitations section. It is also your answer when a reviewer asks "is this really method X?"
+
+---
+
+## Status
+
+All sixteen arXiv IDs and titles checked on 11 Oct 2026. "Official code" and "Beyond the advantage" come from each paper's abstract; confirm both when you read the paper.
+
+| # | Method | arXiv | Tier | Official code | Beyond the advantage | Our code | Unit test | Authors contacted |
+|---|---|---|---|---|---|---|---|---|
+| 0 | Vanilla GRPO | 2402.03300 | 1 | none in abstract | the reference loop | | | |
+| 1 | Dr. GRPO | 2503.20783 | 1 | github.com/sail-sg/understand-r1-zero | changes the loss normalisation | | | |
+| 2 | DAPO | 2503.14476 | 1 | verl-based release (link in paper) | clip-higher, dynamic sampling, token-level loss, overlong reward shaping | | | |
+| 3 | RLOO | 2402.14740 | 1 | none in abstract | none; proposed for RLHF and compared with PPO | | | |
+| 4 | Sign advantage | 2605.07689 | 1 | none in abstract | none | | | |
+| 5 | NGRPO | 2509.18851 | 1 | github.com/nangongrui-ngr/NGRPO | asymmetric clipping | | | |
+| 6 | SoftmaxGRPO | 2608.09271 | 1 | none in abstract | a temperature parameter | | | |
+| 7 | CoRPO | 2511.04439 | 1 | none in abstract | a correctness threshold | | | |
+| 8 | MC-GRPO | 2601.22582 | 1 | github.com/lotusroot-kim/MC-GRPO | one extra rollout per prompt; count it in the budget | | | |
+| 9 | 2-GRPO | 2510.00977 | 1 | none in abstract | group size 2 only | | | |
+| 10 | EBPO | 2602.05165 | 2 | none in abstract | a running global prior (state) | | | |
+| 11 | KRPO | 2505.07527 | 2 | github.com/billhhh/KRPOLLMsRL | a per-prompt Kalman filter (state) | | | |
+| 12 | BV-Blend | 2606.28707 | 2 | none in abstract | semantic prompt clusters plus running statistics (state) | | | |
+| 13 | HA-DW | 2601.08521 | 2 | none in abstract | an evolving difficulty anchor (state) | | | |
+| 14 | SignBalance | 2609.04063 | 2 | "will be released" | per-class rescaling; reports parity with GRPO on open-answer math | | | |
+| 15 | LENS | 2510.08696 | 2 | none in abstract | each response's likelihood | | | |
+
+Our code: the file under `src/advantages/`. Unit test: its name in `tests/test_advantages.py`.
+
+**What this means for the interface.** "Rewards in, advantages out" is not enough. The advantage function also needs group and prompt IDs, each response's log-probability (LENS), prompt cluster IDs (BV-Blend), and a state object that persists across steps (EBPO, KRPO, HA-DW, BV-Blend). Design the signature for all of these before you write method 1.
+
+**Closest papers to test against or cite** (found 11 Oct 2026):
+
+- 2605.07689: Sign advantage beats Dr. GRPO by 45 points on GSM8K at group size 4 (Qwen3.5-9B, seven seeds). The strongest claim your benchmark can confirm or refute.
+- 2605.21125: names the zero-advantage fraction the "advantage collapse rate" and reports that it predicts final performance. Your Figure 3 tests this.
+- 2607.00152: argues GRPO, Dr. GRPO and DAPO are three settings of the group standard deviation.
+- 2605.25252: GRPO on GSM8K with Qwen2.5 0.5B and 1.5B, the same task and models as yours. Use it to sanity-check your accuracy ranges.
+
+---
+
+## Shared loop
+
+These settings apply to every method unless the method's entry overrides them. Fill them in once, before Gate 1. Changing one later means re-running everything.
+
+| Setting | Value | Where it lives |
+|---|---|---|
+| TRL version (reference only) | | `pyproject.toml` |
+| torch and transformers versions | | `pyproject.toml` |
+| GPU type and precision for benchmark runs | | `configs/base.yaml` |
+| Padding side; prompt tokens masked from the loss | | `src/train/logprobs.py` |
+| Logits divided by the sampling temperature before log-probs? | | `src/train/logprobs.py` |
+| Old log-probs recomputed by the training model, detached | | `src/train/loop.py` |
+| Updates per batch | | `configs/base.yaml` |
+| Default clip range | | `configs/base.yaml` |
+| KL coefficient and estimator | | `configs/base.yaml` |
+| Default token aggregation | | `src/train/loss.py` |
+| Group where every reward is equal: what happens | | `src/advantages/vanilla.py` |
+| Advantage std: n or n−1, and the epsilon | | `src/advantages/vanilla.py` |
+| GSM8K answer parser rule | | `src/reward/` |
+| Validation split: which ~500 training problems, and the seed | | `configs/base.yaml` |
+| How a seed sets data order and initialisation | | `src/train/loop.py` |
+
+---
+
+## Method entries
+
+Copy this block for each method when you start it.
+
+### `#` Method (arXiv id)
+
+- **Paper version read:** v_, dated ____
+- **Official code:** link at a fixed commit, or "none found"
+- **What it changes (one sentence):**
+- **When it should help (one sentence):**
+- **Implemented from:** eq. __, section __, in `src/advantages/____.py`
+- **Config keys it owns:**
+- **Unit test:** `test_____`. Hand-worked example: rewards ____ give advantages ____
+
+**Ambiguities**
+
+| # | Question | Options | Choice | Why | Evidence |
+|---|---|---|---|---|---|
+| 1 | | | | | paper section, code line, or author reply |
+
+**Deviations from the paper:** what differs from the paper's setup and why (budget matching, group size, model).
+
+**Author correspondence:** date sent, who, the question in one line, reply date, the answer quoted, resolved or not. Keep email addresses out of the repo.
+
+**Check against the paper's own numbers:** their setting, ours, what we saw, verdict.
+
+---
+
+### Example: 0 Vanilla GRPO (arXiv 2402.03300)
+
+Settle these from the paper before writing code, then fill in Choice, Why and Evidence.
+
+| # | Question | Options | Choice | Why | Evidence |
+|---|---|---|---|---|---|
+| 1 | Is each response's loss divided by its length? | per-response mean / token mean over the batch / a constant | | | |
+| 2 | Which std goes in the advantage, and is an epsilon added? | n or n−1; epsilon value | | | |
+| 3 | What happens when every reward in a group is equal? | advantage 0 / drop the group | | | |
+| 4 | Which KL estimator and coefficient, and is it applied per token? | | | | |
+| 5 | How many updates per batch, and what clip range? | | | | |
+
+---
+
+## Decision log
+
+Newest first. One line for every decision that could change a number.
+
+| Date | Method | Decision | Why | Re-run needed? |
+|---|---|---|---|---|
+| | | | | |
+
+## Open questions
+
+- [ ] 
+
+## Asking authors
+
+1. One question per email. Cite the equation and section.
+2. State your reading first, then ask whether it is right, so a yes or no is enough.
+3. Follow up once after a week. If there is still no reply, implement your best reading and say so in the paper.
