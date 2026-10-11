@@ -1,10 +1,3 @@
-# Project 1: GRPO advantage benchmark
-
-The plan lives in the doc **Project 1 — GRPO Advantage Benchmark**:
-https://claude.ai/artifact/1DoF6ogcFjsnxX5WeUuV9U
-
-This folder becomes the repo.
-
 ## What's here
 
 - `warmup/reinforce/`: weeks 1–2. Write `reinforce.py` until its tests pass. **Start here.**
