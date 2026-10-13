@@ -49,10 +49,11 @@ class ActorCritic(nn.Module):
 
     def __init__(self, obs_dim: int, n_actions: int, hidden: int = 64):
         super().__init__()
-        raise NotImplementedError
+        self.actor = nn.Sequential(nn.Linear(obs_dim, hidden), nn.Tanh(), nn.Linear(hidden, n_actions))
+        self.critic = nn.Sequential(nn.Linear(obs_dim, hidden), nn.Tanh(), nn.Linear(hidden, 1))
 
     def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        raise NotImplementedError
+        return self.actor(obs), self.critic(obs).squeeze(-1)
 
 
 def ppo_policy_loss(
