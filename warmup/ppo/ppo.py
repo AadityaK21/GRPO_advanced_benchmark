@@ -33,7 +33,15 @@ def compute_gae(
     Return (advantages, returns), with returns = advantages + values.
     Both are float numpy arrays of length T. One backward pass, no double loop.
     """
-    raise NotImplementedError
+    T = len(rewards)
+    advantages = np.zeros(T)
+    next_value = last_value   # V(s_{t+1}) for the final step
+    next_adv = 0.0            # A[t+1] for the final step
+    for t in reversed(range(T)):
+        delta = rewards[t] + gamma * next_value * (1 - dones[t]) - values[t]
+        advantages[t] = delta + gamma * lam * (1 - dones[t]) * next_adv
+        next_value, next_adv = values[t], advantages[t]
+    return advantages, advantages + values
 
 
 class ActorCritic(nn.Module):
