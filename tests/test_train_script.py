@@ -31,7 +31,8 @@ def tiny_dir(tmp_path):
     return tmp_path
 
 
-@pytest.mark.parametrize("extra", [[], ["--beta", "0.04"], ["--lora-r", "4", "--beta", "0.04"], ["--num-updates", "2"]])
+@pytest.mark.parametrize("extra", [[], ["--beta", "0.04"], ["--lora-r", "4", "--beta", "0.04"], ["--num-updates", "2"],
+                                   ["--no-grad-ckpt"]])
 def test_two_steps_run_and_log(tiny_dir, extra):
     if "--lora-r" in extra:
         pytest.importorskip("peft")

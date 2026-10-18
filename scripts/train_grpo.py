@@ -16,12 +16,15 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import os
 import random
 import sys
 import time
 from pathlib import Path
 
-import torch
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")   # less fragmentation; before CUDA starts
+
+import torch  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # so `import src...` works from anywhere
 
@@ -53,6 +56,8 @@ def parse_args(argv=None):
     p.add_argument("--eps-high", type=float, default=0.2, help="TRL: epsilon_high (None means epsilon)")
     p.add_argument("--max-grad-norm", type=float, default=1.0)
     p.add_argument("--lora-r", type=int, default=0, help="0 = full fine-tuning; >0 = LoRA of this rank")
+    p.add_argument("--no-grad-ckpt", action="store_true",
+                   help="turn off gradient checkpointing (TRL's default is on; it trades compute for memory)")
     p.add_argument("--seed", type=int, default=42, help="TRL's default seed")
     p.add_argument("--no-shuffle", action="store_true", help="keep the dataset order (TRL: shuffle_dataset=False)")
     p.add_argument("--out", default="runs/grpo")
@@ -106,6 +111,10 @@ def build(args, device):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(args.model, dtype=pick_dtype(device)).to(device)
+    if not args.no_grad_ckpt:
+        # Keep only each layer's input during the forward pass and recompute the rest in backward.
+        # It only acts in train mode; sampling switches to eval mode by itself.
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     ref_model = None
     if args.lora_r > 0:
         from peft import LoraConfig, get_peft_model
@@ -116,6 +125,7 @@ def build(args, device):
             ref_model = AdapterOff(model)
     elif args.beta != 0.0:
         ref_model = copy.deepcopy(model).eval().requires_grad_(False)
+    model.train()   # Qwen2.5 has no dropout, so train and eval mode give the same log-probs
     return model, tokenizer, ref_model
 
 
@@ -156,12 +166,15 @@ def main(argv=None) -> list[dict]:
             stats = grpo_step(model, optimizer, tokenizer, prompts, answers, exact_match_reward, settings, ref_model)
             scheduler.step()
             stats.update(step=step, lr=lr, seconds=round(time.perf_counter() - t0, 3))
+            if device == "cuda":
+                stats["gpu_peak_gb"] = round(torch.cuda.max_memory_allocated() / 2**30, 2)
             history.append(stats)
             log.write(json.dumps(stats) + "\n")
             log.flush()
             if step % args.log_every == 0 or step == args.steps - 1:
                 print(f"step {step:4d}  reward {stats['reward']:.3f}  len {stats['completion_length']:6.1f}  "
-                      f"clip {stats['clip_frac']:.3f}  kl {stats['kl']:.4f}  {stats['seconds']:.1f}s", flush=True)
+                      f"clip {stats['clip_frac']:.3f}  kl {stats['kl']:.4f}  {stats['seconds']:.1f}s"
+                      + (f"  peak {stats['gpu_peak_gb']:.1f} GB" if "gpu_peak_gb" in stats else ""), flush=True)
 
     if args.save:
         model.save_pretrained(out / "model")

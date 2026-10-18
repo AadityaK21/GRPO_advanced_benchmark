@@ -18,7 +18,7 @@ def per_token_logps(model, input_ids: torch.Tensor, attention_mask: torch.Tensor
     # Ask the model for the last logits_to_keep + 1 positions only, as TRL does: the prompt's
     # other logits are never used, and on Qwen each position costs a 152k-wide row.
     logits = model(input_ids=input_ids, attention_mask=attention_mask,
-                   logits_to_keep=logits_to_keep + 1).logits
+                   logits_to_keep=logits_to_keep + 1, use_cache=False).logits   # no KV cache when scoring
     # The one-token shift: logits at position t predict token t + 1. So the logits for the
     # completion tokens are the kept positions except the last one (which predicts past the end).
     logits = logits[:, :-1, :].float()                          # [B, C, V]

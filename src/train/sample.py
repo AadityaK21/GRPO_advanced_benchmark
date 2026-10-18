@@ -35,6 +35,15 @@ def sample_group(model, tokenizer, prompts: list[str], group_size: int, max_new_
     exactly this distribution. model.generate() is fine, but it fills in every setting you don't
     pass from the checkpoint's generation_config.json.
     """
+    was_training = model.training
+    model.eval()   # generate() drops its KV cache under gradient checkpointing in train mode: very slow
+    try:
+        return _sample(model, tokenizer, prompts, group_size, max_new_tokens, temperature)
+    finally:
+        model.train(was_training)
+
+
+def _sample(model, tokenizer, prompts, group_size, max_new_tokens, temperature) -> dict:
     device = next(model.parameters()).device
     # Pad on the LEFT, so every prompt ends at the same column and every completion starts
     # right after it. Right padding would put pad tokens between a prompt and its answer.
