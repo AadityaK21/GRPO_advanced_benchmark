@@ -9,7 +9,14 @@ def completion_mask(completion_ids: torch.Tensor, eos_token_ids) -> torch.Tensor
     eos_token_ids: one id or a list of ids. Qwen2.5-Instruct stops on either of two,
     151645 (<|im_end|>) and 151643 (<|endoftext|>).
     """
-    raise NotImplementedError
+    if isinstance(eos_token_ids, int):
+        eos_token_ids = [eos_token_ids]
+    eos = torch.tensor(list(eos_token_ids), device=completion_ids.device)
+    is_eos = torch.isin(completion_ids, eos).long()          # 1 where the token is any EOS id
+    # How many EOS tokens came strictly BEFORE each position. Zero means we have not yet
+    # passed the first EOS, so the token counts; that includes the first EOS itself.
+    eos_before = is_eos.cumsum(dim=1) - is_eos
+    return (eos_before == 0).int()
 
 
 def sample_group(model, tokenizer, prompts: list[str], group_size: int, max_new_tokens: int,
