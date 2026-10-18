@@ -21,7 +21,10 @@ def per_token_logps(model, input_ids: torch.Tensor, attention_mask: torch.Tensor
                    logits_to_keep=logits_to_keep + 1).logits
     # The one-token shift: logits at position t predict token t + 1. So the logits for the
     # completion tokens are the kept positions except the last one (which predicts past the end).
-    logits = logits[:, :-1, :].float() / temperature            # [B, C, V]; temperature BEFORE softmax
+    logits = logits[:, :-1, :].float()                          # [B, C, V]
+    if temperature != 1.0:
+        logits = logits / temperature                           # temperature BEFORE the softmax
+                                                                # (skipped at 1.0: saves a [B, C, V] copy)
     targets = input_ids[:, -logits_to_keep:]                     # [B, C], the completion tokens
     # log softmax(x)[y] = x[y] - logsumexp(x). Pick one logit per position instead of building
     # the full [B, C, V] log-softmax.

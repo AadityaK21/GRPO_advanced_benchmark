@@ -19,6 +19,7 @@ def completion_mask(completion_ids: torch.Tensor, eos_token_ids) -> torch.Tensor
     return (eos_before == 0).int()
 
 
+@torch.no_grad()
 def sample_group(model, tokenizer, prompts: list[str], group_size: int, max_new_tokens: int,
                  temperature: float) -> dict:
     """Sample `group_size` completions for each prompt.
@@ -34,4 +35,43 @@ def sample_group(model, tokenizer, prompts: list[str], group_size: int, max_new_
     exactly this distribution. model.generate() is fine, but it fills in every setting you don't
     pass from the checkpoint's generation_config.json.
     """
-    raise NotImplementedError
+    device = next(model.parameters()).device
+    # Pad on the LEFT, so every prompt ends at the same column and every completion starts
+    # right after it. Right padding would put pad tokens between a prompt and its answer.
+    enc = tokenizer(list(prompts), return_tensors="pt", padding=True, padding_side="left")
+    # Each prompt G times in a row: rows i*G .. i*G+G-1 are prompt i (repeat_interleave, not repeat,
+    # which would tile the prompts and break the grouping that the advantages rely on).
+    prompt_ids = enc["input_ids"].repeat_interleave(group_size, dim=0).to(device)
+    prompt_mask = enc["attention_mask"].repeat_interleave(group_size, dim=0).to(device)
+    eos = _eos_ids(model, tokenizer)
+    out = model.generate(
+        input_ids=prompt_ids,
+        attention_mask=prompt_mask,
+        max_new_tokens=max_new_tokens,
+        # Plain sampling from softmax(logits / temperature). Every other rule is switched off
+        # explicitly, because generate() would otherwise take Qwen's own top_k=20, top_p=0.8 and
+        # repetition_penalty=1.1, and the log-probs in the loss would describe the wrong distribution.
+        do_sample=True,
+        temperature=temperature,
+        top_k=0,
+        top_p=1.0,
+        repetition_penalty=1.0,
+        eos_token_id=eos,
+        pad_token_id=tokenizer.pad_token_id,
+    )
+    completion_ids = out[:, prompt_ids.size(1):]          # generate() returns prompt + completion
+    return {
+        "prompt_ids": prompt_ids,
+        "prompt_mask": prompt_mask,
+        "completion_ids": completion_ids,
+        "completion_mask": completion_mask(completion_ids, eos),
+    }
+
+
+def _eos_ids(model, tokenizer) -> list[int]:
+    """Every id that ends a completion: the model's own list (Qwen2.5-Instruct has two) plus the tokenizer's."""
+    ids = model.generation_config.eos_token_id
+    ids = [] if ids is None else ([ids] if isinstance(ids, int) else list(ids))
+    if tokenizer.eos_token_id is not None and tokenizer.eos_token_id not in ids:
+        ids.append(tokenizer.eos_token_id)
+    return ids

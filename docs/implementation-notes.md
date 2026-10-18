@@ -50,17 +50,18 @@ These settings apply to every method unless the method's entry overrides them. F
 
 | Setting | Value | Where it lives |
 |---|---|---|
-| TRL version (reference only) | | `pyproject.toml` |
-| torch and transformers versions | | `pyproject.toml` |
+| TRL version (reference only) | 1.15.0 | `pyproject.toml` |
+| torch and transformers versions | torch 2.14.1, transformers 5.19.0 (datasets 5.1.0, Python 3.14 on the laptop) | `pyproject.toml` |
 | GPU type and precision for benchmark runs | | `configs/base.yaml` |
-| Padding side; prompt tokens masked from the loss | | `src/train/logprobs.py` |
-| Logits divided by the sampling temperature before log-probs? | | `src/train/logprobs.py` |
-| Old log-probs recomputed by the training model, detached | | `src/train/loop.py` |
+| Padding side; prompt tokens masked from the loss | Left padding; only completion tokens up to and including the first EOS count (`completion_mask`) | `src/train/logprobs.py` |
+| Logits divided by the sampling temperature before log-probs? | Yes, before the log-softmax, for the policy, old and reference log-probs alike (as TRL) | `src/train/logprobs.py` |
+| Old log-probs recomputed by the training model, detached | Once per sampled batch, before the first update, only when updates > 1; with 1 update, old = logps.detach() (as TRL) | `src/train/loop.py` |
 | Updates per batch | | `configs/base.yaml` |
 | Default clip range | | `configs/base.yaml` |
 | KL coefficient and estimator | | `configs/base.yaml` |
 | Default token aggregation | | `src/train/loss.py` |
-| Group where every reward is equal: what happens | | `src/advantages/vanilla.py` |
+| Group where every reward is equal: what happens | All advantages 0 (0 / (0 + 1e-4)); the group still counts in the loss denominator | `src/advantages/grpo.py` |
+| Prompt format | Chat template, one user turn: the question, a space, then `Let's think step by step and output the final answer after "####".` | `scripts/train_grpo.py` |
 | Advantage std: n or n−1, and the epsilon | | `src/advantages/vanilla.py` |
 | GSM8K answer parser rule | | `src/reward/` |
 | Validation split: which ~500 training problems, and the seed | | `configs/base.yaml` |
