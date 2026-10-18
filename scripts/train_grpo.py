@@ -86,7 +86,8 @@ def format_prompt(tokenizer, question: str) -> str:
 
 class AdapterOff(torch.nn.Module):
     """The reference model for LoRA runs: the same model with the adapter switched off, so no second
-    copy sits in memory. per_token_logps only calls it, and a no-grad call is all it needs."""
+    copy sits in memory. per_token_logps calls it with gradients off. get_decoder and
+    get_output_embeddings let it score in chunks like the model itself."""
 
     def __init__(self, peft_model):
         super().__init__()
@@ -95,6 +96,25 @@ class AdapterOff(torch.nn.Module):
     def forward(self, *args, **kwargs):
         with self.peft_model.disable_adapter():
             return self.peft_model(*args, **kwargs)
+
+    def get_decoder(self):
+        return _WithAdapterOff(self.peft_model, self.peft_model.get_decoder())
+
+    def get_output_embeddings(self):
+        return _WithAdapterOff(self.peft_model, self.peft_model.get_output_embeddings())
+
+
+class _WithAdapterOff(torch.nn.Module):
+    """Runs one part of a PEFT model (its body or its output layer) with the adapter switched off."""
+
+    def __init__(self, peft_model, part):
+        super().__init__()
+        self._peft = [peft_model]     # a list, so it is not registered as a submodule twice
+        self.part = part
+
+    def forward(self, *args, **kwargs):
+        with self._peft[0].disable_adapter():
+            return self.part(*args, **kwargs)
 
 
 def pick_dtype(device: str) -> torch.dtype:

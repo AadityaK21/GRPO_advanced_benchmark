@@ -47,3 +47,26 @@ def test_two_steps_run_and_log(tiny_dir, extra):
     assert {"reward", "clip_frac", "kl", "loss", "completion_length", "lr", "step"} <= set(lines[0])
     assert lines[0]["lr"] == pytest.approx(1e-3) and lines[1]["lr"] == pytest.approx(5e-4), "linear decay to 0"
     assert json.loads((out / "config.json").read_text())["instruction"]
+
+
+def test_adapter_off_scores_like_the_base_model_in_chunks():
+    """The LoRA reference model must give the base model's log-probs, chunked or not."""
+    peft = pytest.importorskip("peft")
+    import torch
+    from src.train.logprobs import per_token_logps
+
+    script = _load_script()
+    base = make_model()
+    input_ids = torch.tensor([[0, 5, 6, 7, 8, 9, 10], [3, 4, 5, 6, 7, 8, 9]])
+    attention_mask = torch.tensor([[0, 1, 1, 1, 1, 1, 1], [1, 1, 1, 1, 1, 1, 1]])
+    with torch.no_grad():
+        want = per_token_logps(base, input_ids, attention_mask, 3, chunk_size=None)
+
+    model = peft.get_peft_model(make_model(), peft.LoraConfig(r=4, lora_alpha=8, target_modules="all-linear",
+                                                               init_lora_weights=False))   # a non-zero adapter
+    ref = script.AdapterOff(model)
+    with torch.no_grad():
+        on = per_token_logps(model, input_ids, attention_mask, 3, chunk_size=2)
+        for chunk_size in (None, 2):
+            torch.testing.assert_close(per_token_logps(ref, input_ids, attention_mask, 3, chunk_size=chunk_size), want)
+    assert not torch.allclose(on, want), "the adapter is on in the model itself"
