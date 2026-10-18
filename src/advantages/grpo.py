@@ -13,4 +13,17 @@ def group_advantages(rewards, group_size: int, scale: str = "group") -> torch.Te
 
     Returns a float32 tensor of the same length. A group whose rewards are all equal gets zeros.
     """
-    raise NotImplementedError
+    r = torch.as_tensor(rewards, dtype=torch.float32).flatten()
+    if group_size < 2 or r.numel() % group_size != 0:
+        raise ValueError(f"need group_size >= 2 dividing {r.numel()} rewards, got group_size={group_size}")
+    # One row per prompt: row i holds the G completions of prompt i (they are consecutive).
+    r = r.view(-1, group_size)
+    # The baseline is the group's own mean, so no critic network is needed (the point of GRPO).
+    adv = r - r.mean(dim=1, keepdim=True)
+    if scale == "group":
+        # torch.std uses Bessel's correction (divides by G - 1), like TRL. The 1e-4 keeps a group
+        # whose rewards are all equal at 0 / 1e-4 = 0 instead of 0 / 0 = NaN.
+        adv = adv / (r.std(dim=1, keepdim=True) + 1e-4)
+    elif scale != "none":
+        raise ValueError(f"unknown scale {scale!r}; use 'group' or 'none'")
+    return adv.flatten()
