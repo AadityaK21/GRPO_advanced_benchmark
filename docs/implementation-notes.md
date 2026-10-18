@@ -111,6 +111,17 @@ Settle these from the paper before writing code, then fill in Choice, Why and Ev
 
 ---
 
+## Verification log
+
+Evidence that the shared loop is a correct GRPO. Newest first.
+
+| Date | Check | Result |
+|---|---|---|
+| 2026-10-19 | Full training run, our loop vs TRL 1.15.0 (`scripts/train_grpo.py` vs `scripts/train_trl.py`): Qwen2.5-0.5B-Instruct, GSM8K train, LoRA r16, lr 1e-5, 512 tokens, group 8, 1 prompt per step, seed 0, 100 steps, Kaggle T4 | Identical reward and completion length on 100 of 100 steps (same seed, same sampling stream) |
+| 2026-10-19 | Control for the row above: our loop with lr 0, otherwise identical | Differs from the trained run from step 1 on (99 of 100 steps), so the match above depends on the updates, not only on sampling |
+| 2026-10-19 | Peak GPU memory in that run | Ours 11.7 GB, TRL 3.2 GB: our log-probs build the full [B, C, vocab] logits; TRL chunks them |
+| 2026-10-19 | `tests/test_against_trl.py` on a Kaggle T4 with TRL's Triton kernel | 53 of 53 passed |
+
 ## Decision log
 
 Newest first. One line for every decision that could change a number.
