@@ -14,4 +14,4 @@ dependencies = [
 
 [project.optional-dependencies]
 lora = ["peft"]
-dev = ["pytest", "gymnasium"]
+dev = ["pytest", "gymnasium", "matplotlib"]

@@ -74,6 +74,8 @@ def _sample(model, tokenizer, prompts, group_size, max_new_tokens, temperature) 
         "prompt_mask": prompt_mask,
         "completion_ids": completion_ids,
         "completion_mask": completion_mask(completion_ids, eos),
+        # True where the completion has no EOS at all: it was cut off at max_new_tokens.
+        "truncated": ~torch.isin(completion_ids, torch.tensor(eos, device=completion_ids.device)).any(dim=1),
     }
 
 

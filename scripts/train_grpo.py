@@ -173,6 +173,7 @@ def main(argv=None) -> list[dict]:
             log.flush()
             if step % args.log_every == 0 or step == args.steps - 1:
                 print(f"step {step:4d}  reward {stats['reward']:.3f}  len {stats['completion_length']:6.1f}  "
+                      f"cut {stats.get('truncated_frac', 0.0):.2f}  "
                       f"clip {stats['clip_frac']:.3f}  kl {stats['kl']:.4f}  {stats['seconds']:.1f}s"
                       + (f"  peak {stats['gpu_peak_gb']:.1f} GB" if "gpu_peak_gb" in stats else ""), flush=True)
 

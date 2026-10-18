@@ -98,5 +98,8 @@ def grpo_step(model, optimizer, tokenizer, prompts: list[str], answers: list[str
         if ref_logps is not None:
             d = ref_logps - lp
             kl = (((torch.exp(d) - d - 1) * m).sum() / n_tokens).item()
-    return {"reward": rewards.mean().item(), "clip_frac": clip_frac, "kl": kl, "loss": loss.item(),
-            "completion_length": m.sum(dim=1).mean().item()}
+    stats = {"reward": rewards.mean().item(), "clip_frac": clip_frac, "kl": kl, "loss": loss.item(),
+             "completion_length": m.sum(dim=1).mean().item()}
+    if "truncated" in batch:   # completions cut off before their answer could be scored
+        stats["truncated_frac"] = batch["truncated"].float().mean().item()
+    return stats
