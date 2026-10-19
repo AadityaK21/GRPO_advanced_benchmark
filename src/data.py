@@ -1,8 +1,8 @@
 """GSM8K splits and the fixed few-shot prompt, identical for every run.
 
 From the train split, with data.split_seed (never the run seed):
-    shots: `prompt.shots` worked examples shown in every prompt
     val:   `data.val_size` problems for validation and tuning
+    shots: `prompt.shots` worked examples shown in every prompt
     train: the rest. The run seed only shuffles their order.
 The test split is used only for final evaluation.
 """
@@ -40,7 +40,8 @@ def make_splits(train_rows: list[dict], val_size: int, shots: int, split_seed: i
     order = list(range(len(rows)))
     random.Random(split_seed).shuffle(order)
     picked = [rows[i] for i in order]
-    return {"shots": picked[:shots], "val": picked[shots:shots + val_size], "train": picked[shots + val_size:]}
+    # Validation first, so the validation set stays the same whatever the number of shots.
+    return {"val": picked[:val_size], "shots": picked[val_size:val_size + shots], "train": picked[val_size + shots:]}
 
 
 def shuffled(rows: list[dict], seed: int) -> list[dict]:

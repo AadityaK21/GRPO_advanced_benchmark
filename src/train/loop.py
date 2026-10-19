@@ -28,6 +28,8 @@ class GRPOSettings:
     max_grad_norm: float | None = None   # if set, clip the gradient norm before each update (TRL: 1.0)
     micro_batch_size: int | None = None  # completions per forward/backward pass. Memory only: the
                                          # gradients are summed so the update is the full batch's
+    truncated_is_wrong: bool = False     # a completion cut off at max_new_tokens scores 0, whatever
+                                         # number it ended on (as Dr. GRPO's code does)
 
 
 def grpo_step(model, optimizer, tokenizer, prompts: list[str], answers: list[str], reward_fn,
@@ -45,7 +47,11 @@ def grpo_step(model, optimizer, tokenizer, prompts: list[str], answers: list[str
     Returns a dict of statistics:
         reward, clip_frac, kl, loss, completion_length, truncated_frac   (as before)
         zero_adv_frac:  fraction of groups whose advantages are all 0, so they give no gradient
-                        (2605.21125's "advantage collapse rate")
+                        (2605.21125's "advantage collapse rate", for vanilla GRPO)
+        uniform_frac:   fraction of groups whose rewards are all equal (all right or all wrong). The
+                        same for every method; zero_adv_frac is lower for methods that give such
+                        groups a signal (Sign, NGRPO)
+        adv_abs_mean:   mean |advantage| over completions: the scale each method trains at
         reward_var:     mean within-group reward variance (divides by G)
         entropy:        mean per-token entropy of the sampling distribution over counted tokens
         grad_norm:      gradient norm before clipping, last update
@@ -69,6 +75,8 @@ def grpo_step(model, optimizer, tokenizer, prompts: list[str], answers: list[str
              for ids, m in zip(completion_ids, cmask)]
     completion_answers = [a for a in answers for _ in range(G)]
     rewards = torch.as_tensor(reward_fn(texts, completion_answers), dtype=torch.float32)
+    if st.truncated_is_wrong and "truncated" in batch:
+        rewards = torch.where(batch["truncated"].cpu(), torch.zeros_like(rewards), rewards)
 
     input_ids = torch.cat([batch["prompt_ids"], completion_ids], dim=1)
     attention_mask = torch.cat([batch["prompt_mask"], cmask], dim=1)
@@ -150,10 +158,14 @@ def grpo_step(model, optimizer, tokenizer, prompts: list[str], answers: list[str
         entropy = ((torch.cat(ent_parts) * m).sum() / n_tokens).item()
         grouped_adv = advantages.detach().cpu().view(-1, G)
         zero_adv_frac = (grouped_adv.abs() < 1e-8).all(dim=1).float().mean().item()
-        reward_var = rewards.view(-1, G).var(dim=1, unbiased=False).mean().item()
+        grouped_r = rewards.view(-1, G)
+        reward_var = grouped_r.var(dim=1, unbiased=False).mean().item()
+        uniform_frac = (grouped_r == grouped_r[:, :1]).all(dim=1).float().mean().item()
+        adv_abs_mean = advantages.detach().abs().mean().item()
     stats = {"reward": rewards.mean().item(), "clip_frac": clip_frac, "kl": kl, "loss": loss_value,
              "completion_length": m.sum(dim=1).mean().item(), "zero_adv_frac": zero_adv_frac,
-             "reward_var": reward_var, "entropy": entropy, "grad_norm": grad_norm, "rollouts": N}
+             "reward_var": reward_var, "uniform_frac": uniform_frac, "adv_abs_mean": adv_abs_mean,
+             "entropy": entropy, "grad_norm": grad_norm, "rollouts": N}
     if "truncated" in batch:   # completions cut off before their answer could be scored
         stats["truncated_frac"] = batch["truncated"].float().mean().item()
     return stats

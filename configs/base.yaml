@@ -39,6 +39,9 @@ sampling:
   temperature: 1.0
   max_new_tokens: 512
 
+reward:
+  truncated_is_wrong: true     # cut off at max_new_tokens = 0, whatever number it ended on (Dr. GRPO's code)
+
 budget:                        # a fixed number of rollouts per run, not a fixed number of steps
   group_size: 8                # swept at 4, 8, 16: override with --set budget.group_size=4
   rollouts_per_step: 64        # completions per step; prompts per step = this // group size

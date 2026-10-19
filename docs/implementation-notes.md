@@ -40,7 +40,8 @@ Our code: the file under `src/advantages/`. Unit test: its name in `tests/test_a
 - 2605.07689: Sign advantage beats Dr. GRPO by 45 points on GSM8K at group size 4 (Qwen3.5-9B, seven seeds). The strongest claim your benchmark can confirm or refute.
 - 2605.21125: names the zero-advantage fraction the "advantage collapse rate" and reports that it predicts final performance. Your Figure 3 tests this.
 - 2607.00152: argues GRPO, Dr. GRPO and DAPO are three settings of the group standard deviation.
-- 2605.25252: GRPO on GSM8K with Qwen2.5 0.5B and 1.5B, the same task and models as yours. Use it to sanity-check your accuracy ranges.
+- 2605.25252: GRPO on GSM8K with Qwen2.5 0.5B and 1.5B (base models, full fine-tuning, one seed per configuration). Use it to sanity-check your accuracy ranges.
+- Found on 19 Oct 2026 (scoop check, none found): 2610.04928 (closest: 5 estimator settings on OLMo-2 1B, GSM8K, 2 seeds), 2601.23135 v2, 2603.19335, 2609.06107. Details and how you differ: `docs/method-specs.md`.
 
 ---
 
@@ -58,13 +59,14 @@ These settings apply to every method unless the method's entry overrides them. F
 | Old log-probs recomputed by the training model, detached | Once per sampled batch, before the first update, only when updates > 1; with 1 update, old = logps.detach() (as TRL) | `src/train/loop.py` |
 | Updates per batch | 1 (TRL's default). With 1, the ratio is exactly 1 and clipping never acts | `configs/base.yaml` |
 | Default clip range | eps_low = eps_high = 0.2 (PPO's and TRL's default). DAPO changes it in its own config | `configs/base.yaml` |
-| KL coefficient and estimator | PROVISIONAL: beta = 0 (TRL's default; DAPO drops the KL term). DeepSeekMath used 0.04 with the k3 estimator. Decide before Gate 1. If not 0: k3, per token, reference = the base model (adapter off) | `configs/base.yaml` |
+| KL coefficient and estimator | beta = 0. Evidence (method-specs.md): TRL's default, Dr. GRPO, DAPO, NGRPO all use 0, and with beta > 0 uniform groups still get a KL gradient, so zero advantage would no longer mean zero gradient. DeepSeekMath used 0.04 (k3): a recorded deviation for vanilla, MC-GRPO and SoftmaxGRPO. Confirm before Gate 1 | `configs/base.yaml` |
+| Truncated completions | Reward 0 (`reward.truncated_is_wrong`), as Dr. GRPO's code does for every arm. Confirm before Gate 1 | `src/train/loop.py` |
 | Default token aggregation | `grpo`: mean over each completion's tokens, then mean over completions (DeepSeekMath eq. 3, 1/G sum_i 1/abs(o_i) sum_t). The TRL-match runs used TRL's default `dapo` instead | `configs/base.yaml`, `src/train/loss.py` |
 | Group where every reward is equal: what happens | All advantages 0 (0 / (0 + 1e-4)); the group still counts in the loss denominator | `src/advantages/grpo.py` |
 | Prompt format | Benchmark runs: three worked examples (fixed, from GSM8K train, calculator marks `<<...>>` removed, `#### N` kept) as earlier user and assistant turns, then the question. Each user turn is the question, a space, then `Let's think step by step and output the final answer after "####".` The TRL-match runs (`scripts/train_grpo.py`) used the last turn alone, zero-shot | `src/data.py` |
 | Advantage std: n or n−1, and the epsilon | n−1 (Bessel), plus 1e-4, as TRL 1.15.0. The paper only says "normalized" | `src/advantages/vanilla.py` |
 | GSM8K answer parser rule | If the text has `####`, the first number after it; otherwise the last number. `$` and thousands commas dropped, trailing decimal zeros dropped. No number = wrong. The same parser scores the reference | `src/reward/gsm8k.py` |
-| Validation split: which ~500 training problems, and the seed | GSM8K train shuffled with `data.split_seed` 1234: the first 3 are the few-shot examples, the next 500 are validation, the rest (6970) train. Identical for every run; `meta.json` records the shot ids and a hash of the validation ids | `src/data.py`, `configs/base.yaml` |
+| Validation split: which ~500 training problems, and the seed | GSM8K train shuffled with `data.split_seed` 1234: the first 500 are validation, the next 3 the few-shot examples, the rest (6970) train. The validation set does not depend on the number of shots. Identical for every run; `meta.json` records the shot ids and a hash of the validation ids | `src/data.py`, `configs/base.yaml` |
 | How a seed sets data order and initialisation | The run seed sets `random` and `torch` before the model loads: it fixes the training-pool order, LoRA's initialisation and the sampling stream. It does not touch the splits or the few-shot examples. Same seed, same machine: identical run | `scripts/run.py` |
 
 ---
@@ -133,6 +135,8 @@ Newest first. One line for every decision that could change a number.
 
 | Date | Method | Decision | Why | Re-run needed? |
 |---|---|---|---|---|
+| 2026-10-19 | all | A method's config changes the loss or sampling only where its paper proposes that change; framework defaults its authors ran (verl token-mean, TRL KL) are recorded as deviations | Keeps the comparison about the estimator, as the plan requires | Not yet run |
+| 2026-10-19 | all | Truncated completions score 0; log `uniform_frac`, `adv_abs_mean`, and the format rate | Dr. GRPO's code; method-specs.md findings 2 and 5 | Not yet run |
 | 2026-10-19 | all | Budget in rollouts: 64 completions per step (prompts per step = 64 // G), 12,800 per run (PROVISIONAL until the week-9 timing run) | The plan fixes rollouts, not steps, so methods that use rollouts differently get no extra compute | Not yet run |
 | 2026-10-19 | all | Few-shot prompt with 3 fixed examples | The plan: 2610.04928 found zero-shot left a 1B model near 0% | Not yet run |
 | 2026-10-19 | all | Default loss aggregation `grpo`, beta 0 (PROVISIONAL) | See the shared-loop rows | Not yet run |
@@ -140,6 +144,12 @@ Newest first. One line for every decision that could change a number.
 
 ## Open questions
 
+- [ ] Prompt: zero-shot or 3-shot? Measure base validation accuracy and format rate both ways (`--eval-only`), then decide. See method-specs.md
+- [ ] Budget: rollouts per step (proposal 256) and total, from the timing run
+- [ ] CoRPO's threshold c under 0/1 rewards (paper used 0, which equals Dr. GRPO's advantage). Proposal: tune c in {0.25, 0.5, 0.75} on validation
+- [ ] MC-GRPO under 0/1 rewards: MAD is always 0, so A = +-1/eps on minority completions only. Email the author: is that intended, and what eps? (Paper silent; code 1e-3)
+- [ ] SoftmaxGRPO's tau: tune in {0.1, 0.3} on validation (paper's 0.1 was picked on test accuracy)
+- [ ] DAPO: the harness needs a refill loop for dynamic sampling (every rollout counted); overlong shaping at 512 tokens (proposal: L_cache 102, penalty x0.5 for 0/1 rewards)
 - [ ] 
 
 ## Asking authors

@@ -12,7 +12,7 @@ def test_methods_inherit_everything_shared():
     assert vanilla["method"] == "vanilla" and dr["method"] == "dr_grpo"
     assert vanilla["advantage"]["name"] == "vanilla" and dr["advantage"]["name"] == "dr_grpo"
     assert vanilla["loss"]["loss_type"] == "grpo" and dr["loss"]["loss_type"] == "dr_grpo"
-    for section in ("model", "lora", "optimizer", "data", "prompt", "sampling", "budget", "eval"):
+    for section in ("model", "lora", "optimizer", "data", "prompt", "sampling", "reward", "budget", "eval"):
         assert vanilla[section] == dr[section], f"{section} must be identical across methods"
 
 
@@ -55,6 +55,8 @@ def test_splits_are_fixed_disjoint_and_keep_gsm8k_indices():
     assert sorted(ids) == list(range(100)), "every problem in exactly one split"
     assert all(r["question"] == f"q{r['idx']}" for r in a["train"])
     assert make_splits(_rows(100), 20, 3, split_seed=7)["val"] != a["val"]
+    assert make_splits(_rows(100), 20, 0, split_seed=1234)["val"] == a["val"], \
+        "the validation set must not depend on the number of shots"
     with pytest.raises(ValueError):
         make_splits(_rows(10), val_size=8, shots=2, split_seed=0)
 

@@ -297,3 +297,40 @@ def test_diagnostics(monkeypatch):
     assert stats["zero_adv_frac"] == 0.5, "one of the two groups is all-correct, so it carries no gradient"
     _, stats = _update(monkeypatch, GRPOSettings(group_size=4, max_new_tokens=8), rewards=[1, 0, 0.5, 0.5] + [1.0] * 4)
     assert stats["zero_adv_frac"] == 0.5, "a group counts only when ALL its advantages are 0, not some"
+
+
+def test_truncated_completions_can_be_scored_wrong(monkeypatch):
+    def with_truncation(model, tokenizer, prompts, group_size, max_new_tokens, temperature):
+        b = {k: v.clone() for k, v in FIXED_BATCH.items()}
+        b["truncated"] = ~(b["completion_ids"] == EOS).any(dim=1)    # rows 1, 3, 5, 7 never end
+        return b
+    monkeypatch.setattr(src.train.loop, "sample_group", with_truncation)
+    seen = {}
+
+    def spy(batch, state):
+        seen["rewards"] = batch.rewards.tolist()
+        return torch.zeros_like(batch.rewards)
+
+    model = make_model()
+    for flag, want in ((False, [1.0] * 8), (True, [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0])):
+        stats = grpo_step(model, torch.optim.SGD(model.parameters(), lr=0.0), make_tokenizer(), ["p0", "p1"],
+                          ["a0", "a1"], lambda t, a: [1.0] * 8,
+                          GRPOSettings(group_size=4, max_new_tokens=4, truncated_is_wrong=flag),
+                          advantage=Advantage(name="spy", fn=spy))
+        assert seen["rewards"] == want
+    assert stats["truncated_frac"] == 0.5
+
+
+def test_uniform_groups_and_advantage_scale(monkeypatch):
+    # Sign gives an all-correct group +1 everywhere: the group is uniform but its advantages are not 0.
+    _, stats = _update(monkeypatch, GRPOSettings(group_size=4, max_new_tokens=8), rewards=[1.0] * 4 + [0, 1, 0, 1],
+                       advantage=build_advantage("sign") if _has_sign() else None)
+    assert stats["uniform_frac"] == 0.5
+    _, stats = _update(monkeypatch, GRPOSettings(group_size=4, max_new_tokens=8, scale="none"),
+                       rewards=[1.0, 0, 0, 0] + [1.0] * 4)
+    assert stats["adv_abs_mean"] == pytest.approx((0.75 + 3 * 0.25) / 8)
+
+
+def _has_sign():
+    import importlib.util
+    return importlib.util.find_spec("src.advantages.sign") is not None

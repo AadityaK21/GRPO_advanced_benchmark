@@ -39,7 +39,16 @@ def greedy_completions(model, tokenizer, prompts: list[str], max_new_tokens: int
 
 def evaluate(model, tokenizer, prompts: list[str], answers: list[str], max_new_tokens: int,
              batch_size: int = 64) -> dict:
-    """{'accuracy': float, 'correct': [0/1 per problem], 'completions': [...]}."""
+    """{'accuracy', 'format_rate', 'correct': [0/1 per problem], 'completions': [...]}.
+
+    format_rate: share of completions that state an answer after "####", the format the prompt asks
+    for. It separates learning the format from learning to solve the problems.
+    """
     completions = greedy_completions(model, tokenizer, prompts, max_new_tokens, batch_size)
     correct = [int(r) for r in exact_match_reward(completions, answers)]
-    return {"accuracy": sum(correct) / max(len(correct), 1), "correct": correct, "completions": completions}
+    n = max(len(correct), 1)
+    return {"accuracy": sum(correct) / n, "format_rate": sum(FORMAT_MARK in c for c in completions) / n,
+            "correct": correct, "completions": completions}
+
+
+FORMAT_MARK = "####"

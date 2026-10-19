@@ -131,8 +131,9 @@ def main(argv=None) -> Path:
         t0 = time.perf_counter()
         res = evaluate(model, tokenizer, val_prompts, val_answers, ec["max_new_tokens"], ec["batch_size"])
         eval_seconds += time.perf_counter() - t0
-        eval_log.write({"step": step, "val_accuracy": res["accuracy"], "seconds": round(time.perf_counter() - t0, 1)})
-        print(f"step {step:4d}  val accuracy {res['accuracy']:.4f}", flush=True)
+        eval_log.write({"step": step, "val_accuracy": res["accuracy"], "val_format_rate": res["format_rate"],
+                        "seconds": round(time.perf_counter() - t0, 1)})
+        print(f"step {step:4d}  val accuracy {res['accuracy']:.4f}  format {res['format_rate']:.2f}", flush=True)
         if res["accuracy"] > best["val_accuracy"]:          # ties keep the earlier step
             best.update(step=step, val_accuracy=res["accuracy"])
             best_weights = _trainable_state(model)
@@ -156,7 +157,7 @@ def main(argv=None) -> Path:
             group_size=b["group_size"], max_new_tokens=cfg["sampling"]["max_new_tokens"],
             temperature=cfg["sampling"]["temperature"], num_updates=L["num_updates"], loss_type=L["loss_type"],
             eps_low=L["eps_low"], eps_high=L["eps_high"], beta=L["beta"], max_grad_norm=o["max_grad_norm"],
-            micro_batch_size=b["micro_batch_size"],
+            micro_batch_size=b["micro_batch_size"], truncated_is_wrong=cfg["reward"]["truncated_is_wrong"],
         )
         train_log = JsonlWriter(run_dir / "train.jsonl")
         cursor, step_times = 0, []
@@ -176,7 +177,8 @@ def main(argv=None) -> Path:
                 stats["gpu_peak_gb"] = round(torch.cuda.max_memory_allocated() / 2**30, 2)
             train_log.write(stats)
             eta = sum(step_times) / len(step_times) * (steps - step - 1) / 60
-            print(f"step {step + 1:4d}/{steps}  reward {stats['reward']:.3f}  zero-adv {stats['zero_adv_frac']:.2f}  "
+            print(f"step {step + 1:4d}/{steps}  reward {stats['reward']:.3f}  uniform {stats['uniform_frac']:.2f}  "
+                  f"zero-adv {stats['zero_adv_frac']:.2f}  "
                   f"len {stats['completion_length']:5.0f}  ent {stats['entropy']:.3f}  "
                   f"gnorm {stats['grad_norm']:.3f}  {stats['seconds']:.1f}s  ~{eta:.0f} min left"
                   + (f"  peak {stats['gpu_peak_gb']:.1f} GB" if "gpu_peak_gb" in stats else ""), flush=True)
@@ -206,8 +208,10 @@ def main(argv=None) -> Path:
         "method": cfg["method"], "seed": seed, "group_size": b["group_size"], "steps": steps,
         "rollouts": rollouts, "budget_rollouts": 0 if args.eval_only else b["total_rollouts"],
         "base_val_accuracy": base_val,
-        "final": {"step": steps, "val_accuracy": last_val, "test_accuracy": final["accuracy"]},
-        "best": {"step": best["step"], "val_accuracy": best["val_accuracy"], "test_accuracy": best_test["accuracy"]},
+        "final": {"step": steps, "val_accuracy": last_val, "test_accuracy": final["accuracy"],
+                  "test_format_rate": final["format_rate"]},
+        "best": {"step": best["step"], "val_accuracy": best["val_accuracy"], "test_accuracy": best_test["accuracy"],
+                 "test_format_rate": best_test["format_rate"]},
         "test_problems": len(test),
         "test_correct_final": "".join(map(str, final["correct"])),
         "test_correct_best": "".join(map(str, best_test["correct"])),

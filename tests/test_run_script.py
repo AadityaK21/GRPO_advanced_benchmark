@@ -47,7 +47,9 @@ def setup(tmp_path_factory):
 def _args(setup, method, *extra):
     sets = [f"model.name={setup / 'model'}", f"model.tokenizer={setup / 'tokenizer'}", "model.dtype=float32",
             "lora.r=0", "data.val_size=4", "prompt.shots=2", "budget.group_size=2", "budget.rollouts_per_step=4",
-            "budget.total_rollouts=8", "budget.micro_batch_size=3", "sampling.max_new_tokens=3", "eval.every=1",
+            "budget.total_rollouts=8", "budget.micro_batch_size=3", "sampling.max_new_tokens=3",
+            "reward.truncated_is_wrong=false",   # 3-token completions are nearly all cut off
+            "eval.every=1",
             "eval.val_problems=4", "eval.max_new_tokens=3", "eval.batch_size=3", f"results_dir={setup / 'results'}"]
     argv = ["--method", method, "--seed", "0", "--local-data", str(setup / "train.jsonl"), str(setup / "test.jsonl")]
     for s in sets:
@@ -79,6 +81,9 @@ def test_a_run_writes_config_seed_commit_and_results(setup, method):
     assert s["final"]["test_accuracy"] == s["test_correct_final"].count("1") / 6
     assert s["best"]["step"] in (0, 1, 2)
     assert s["best"]["val_accuracy"] == max(e["val_accuracy"] for e in evals)
+    assert 0.0 <= s["final"]["test_format_rate"] <= 1.0 and "val_format_rate" in evals[0]
+    for key in ("uniform_frac", "adv_abs_mean"):
+        assert key in train[0], key
 
 
 def test_seeds_change_the_run_and_repeat_exactly(setup):
