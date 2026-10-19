@@ -117,6 +117,8 @@ Evidence that the shared loop is a correct GRPO. Newest first.
 
 | Date | Check | Result |
 |---|---|---|
+| 2026-10-19 | Chunked log-probs on the GPU: our loop vs TRL 1.15.0, same setting as the 100-step match below, 20 steps, Kaggle T4 | Identical reward and completion length on 20 of 20 steps. Peak GPU memory 3.19 GB (was 11.7 GB; TRL 3.2 GB) |
+| 2026-10-19 | `scripts/run.py --smoke` on a Kaggle T4: 3-shot prompt, 2 steps of 16 completions, validation and test on 16 problems each | Runs end to end in 1.6 min, peak 3.1 GB, writes config, meta, train/eval logs and summary |
 | 2026-10-19 | Chunked log-probs (`src/train/logprobs.py`, 256 tokens per piece) against all-at-once, `tests/test_logprobs.py` | Same log-probs and gradients (1e-5), also with gradient checkpointing and with LoRA's adapter-off reference. CPU memory for 8 × 512 tokens at a 50k vocabulary: 3.9 GB → 0.35 GB |
 | 2026-10-19 | Micro-batches against the full batch, every loss type, `tests/test_loop.py` | Same update (1e-4) |
 | 2026-10-19 | Statistics under the null, simulated (`tests/test_null.py`) | Unpaired IQM intervals at 10 vs 10 runs exclude 0 in 4.6% of null splits. The paired test rejects 6.0–6.5% under the null: slightly above 5%, so the real null control matters |
