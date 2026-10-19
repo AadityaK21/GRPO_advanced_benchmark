@@ -188,3 +188,112 @@ def test_learns_a_toy_task():
         print(f"seed {seed}: mean reward {first:.2f} over the first 10 steps, {last:.2f} over the last 10")
         learned += last > 0.8
     assert learned >= 2, "GRPO should learn this on at least 2 of 3 seeds within 100 steps"
+
+
+# ---- Harness additions: micro-batches, the advantage interface, diagnostics -------------------------
+
+from src.advantages.base import Advantage, build_advantage  # noqa: E402
+
+
+def _fixed(monkeypatch, seen=None):
+    def fixed_sample_group(model, tokenizer, prompts, group_size, max_new_tokens, temperature):
+        if seen is not None:
+            seen["group_size"] = group_size
+        return {k: v.clone() for k, v in FIXED_BATCH.items()}
+    monkeypatch.setattr(src.train.loop, "sample_group", fixed_sample_group)
+
+
+def _update(monkeypatch, settings, rewards=FIXED_REWARDS, **kw):
+    """The parameter change from one SGD step (lr 1) on the fixed batch, and the step's stats."""
+    _fixed(monkeypatch)
+    model = make_model(logit_scale=5.0)
+    before = copy.deepcopy(model.state_dict())
+    stats = grpo_step(model, torch.optim.SGD(model.parameters(), lr=1.0), make_tokenizer(), ["p0", "p1"],
+                      ["a0", "a1"], lambda texts, answers: rewards, settings,
+                      ref_model=make_model(seed=1, logit_scale=5.0) if settings.beta else None, **kw)
+    return {n: before[n] - v for n, v in model.state_dict().items()}, stats
+
+
+@pytest.mark.parametrize("loss_type", ["grpo", "dapo", "bnpo", "dr_grpo"])
+@pytest.mark.parametrize("micro", [1, 3, 5])
+def test_micro_batches_give_the_full_batch_update(monkeypatch, loss_type, micro):
+    kw = dict(group_size=4, max_new_tokens=8, temperature=0.9, loss_type=loss_type, beta=0.04, num_updates=2,
+              max_grad_norm=None)
+    full, s_full = _update(monkeypatch, GRPOSettings(**kw))
+    split, s_split = _update(monkeypatch, GRPOSettings(**kw, micro_batch_size=micro))
+    for name in full:
+        torch.testing.assert_close(split[name], full[name], rtol=1e-4, atol=1e-6,
+                                   msg=f"{name}: weight each micro-batch so the summed gradient is the batch's")
+    for key in ("loss", "clip_frac", "kl", "entropy", "grad_norm"):
+        assert s_split[key] == pytest.approx(s_full[key], rel=1e-4, abs=1e-6), key
+
+
+def test_the_vanilla_method_object_is_the_built_in_path(monkeypatch):
+    s = GRPOSettings(group_size=4, max_new_tokens=8, loss_type="grpo")
+    plain, _ = _update(monkeypatch, s)
+    via_method, _ = _update(monkeypatch, s, advantage=build_advantage("vanilla"))
+    for name in plain:
+        torch.testing.assert_close(via_method[name], plain[name])
+    dr, _ = _update(monkeypatch, GRPOSettings(group_size=4, max_new_tokens=8, loss_type="dr_grpo"),
+                    advantage=build_advantage("dr_grpo"))
+    dr_plain, _ = _update(monkeypatch, GRPOSettings(group_size=4, max_new_tokens=8, loss_type="dr_grpo", scale="none"))
+    for name in dr:
+        torch.testing.assert_close(dr[name], dr_plain[name])
+
+
+def test_methods_get_what_they_ask_for(monkeypatch):
+    seen = {}
+
+    def spy(batch, state):
+        seen["batch"] = batch
+        return torch.zeros_like(batch.rewards)
+
+    method = Advantage(name="spy", fn=spy, needs=("seq_logps",))
+    _update(monkeypatch, GRPOSettings(group_size=4, max_new_tokens=8, temperature=0.9), advantage=method,
+            prompt_ids=[1234, 99], step=7)
+    b = seen["batch"]
+    assert b.prompt_ids.tolist() == [1234, 99] and b.step == 7 and b.group_size == 4
+    assert b.lengths.tolist() == FIXED_BATCH["completion_mask"].sum(dim=1).tolist()
+    model = make_model(logit_scale=5.0)
+    ids = torch.cat([FIXED_BATCH["prompt_ids"], FIXED_BATCH["completion_ids"]], dim=1)
+    am = torch.cat([FIXED_BATCH["prompt_mask"], FIXED_BATCH["completion_mask"]], dim=1)
+    with torch.no_grad():
+        want = (per_token_logps(model, ids, am, 4, 0.9) * FIXED_BATCH["completion_mask"]).sum(dim=1)
+    torch.testing.assert_close(b.seq_logps, want, msg="seq_logps: each completion's summed log-prob, counted tokens only")
+
+
+def test_extra_rollouts_are_sampled_and_counted(monkeypatch):
+    seen = {}
+    _fixed(monkeypatch, seen)
+    method = Advantage(name="plus_one", fn=lambda b, s: torch.zeros_like(b.rewards), extra_rollouts=1)
+    model = make_model()
+    # FIXED_BATCH has 8 rows = 2 prompts x 4, so ask for group size 3 plus 1 extra.
+    stats = grpo_step(model, torch.optim.SGD(model.parameters(), lr=0.0), make_tokenizer(), ["p0", "p1"],
+                      ["a0", "a1"], lambda t, a: FIXED_REWARDS, GRPOSettings(group_size=3, max_new_tokens=8),
+                      advantage=method)
+    assert seen["group_size"] == 4 and stats["rollouts"] == 8
+
+
+def test_dropped_completions_give_no_gradient(monkeypatch):
+    s = GRPOSettings(group_size=4, max_new_tokens=8, loss_type="dapo")
+    adv = group_advantages(FIXED_REWARDS, 4)
+    keep = torch.tensor([True, True, False, True, True, True, True, True])
+    dropped, _ = _update(monkeypatch, s, advantage=Advantage(name="drop", fn=lambda b, st: (adv, keep)))
+    # The same update as a batch where completion 2 has no counted tokens at all.
+    mask = FIXED_BATCH["completion_mask"].clone()
+    mask[2] = 0
+    monkeypatch.setitem(FIXED_BATCH, "completion_mask", mask)
+    want, _ = _update(monkeypatch, s)
+    for name in want:
+        torch.testing.assert_close(dropped[name], want[name])
+
+
+def test_diagnostics(monkeypatch):
+    # Group 1 [1, 0, 0, 1]: variance 0.25. Group 2 [0, 1, 1, 1]: 0.1875. No all-equal group.
+    _, stats = _update(monkeypatch, GRPOSettings(group_size=4, max_new_tokens=8))
+    assert stats["zero_adv_frac"] == 0.0 and stats["reward_var"] == pytest.approx((0.25 + 0.1875) / 2)
+    assert stats["rollouts"] == 8 and stats["grad_norm"] > 0 and stats["entropy"] > 0
+    _, stats = _update(monkeypatch, GRPOSettings(group_size=4, max_new_tokens=8), rewards=[1.0] * 4 + [0, 1, 0, 1])
+    assert stats["zero_adv_frac"] == 0.5, "one of the two groups is all-correct, so it carries no gradient"
+    _, stats = _update(monkeypatch, GRPOSettings(group_size=4, max_new_tokens=8), rewards=[1, 0, 0.5, 0.5] + [1.0] * 4)
+    assert stats["zero_adv_frac"] == 0.5, "a group counts only when ALL its advantages are 0, not some"

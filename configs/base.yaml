@@ -1,0 +1,66 @@
+# Everything every condition shares. A method's own file, configs/methods/<name>.yaml, may set only
+# its `advantage` and `loss` sections (src/config.py enforces this). Changing a value here after
+# Gate 1 means re-running every condition, so record each change in docs/implementation-notes.md.
+#
+# Values marked PROVISIONAL are set by the week-9 timing run and Gate 1, then frozen.
+
+model:
+  name: Qwen/Qwen2.5-0.5B-Instruct
+  tokenizer: null              # null = the model's own
+  dtype: auto                  # bfloat16 where the GPU has it natively, else float32. Every run records
+                               # its GPU and dtype; all benchmark runs must share one of each
+  gradient_checkpointing: true
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.0                 # 0: log-probs must be deterministic
+  target_modules: all-linear
+
+optimizer:
+  lr: 1.0e-5                   # PROVISIONAL: each method's lr comes from the equal-budget tuning sweep
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+  weight_decay: 0.0
+  schedule: linear             # decays to 0 over the run, no warmup (TRL's default)
+  max_grad_norm: 1.0
+
+data:
+  dataset: openai/gsm8k
+  val_size: 500                # held out from the train split: validation and tuning only
+  split_seed: 1234             # fixes the validation split and the few-shot examples for EVERY run.
+                               # Never change it, never tie it to the run seed
+
+prompt:
+  shots: 3                     # fixed worked examples from the train split, as earlier chat turns
+  instruction: Let's think step by step and output the final answer after "####".
+
+sampling:
+  temperature: 1.0
+  max_new_tokens: 512
+
+budget:                        # a fixed number of rollouts per run, not a fixed number of steps
+  group_size: 8                # swept at 4, 8, 16: override with --set budget.group_size=4
+  rollouts_per_step: 64        # completions per step; prompts per step = this // group size
+  total_rollouts: 12800        # PROVISIONAL (200 steps at 64): set from the week-9 timing run
+  micro_batch_size: 16         # completions per forward/backward pass. Memory only, not the maths
+
+advantage:
+  name: vanilla
+  params: {}
+
+loss:
+  loss_type: grpo              # DeepSeekMath's 1/G sum_i 1/|o_i| sum_t: mean per completion, then mean
+  eps_low: 0.2
+  eps_high: 0.2
+  beta: 0.0                    # KL coefficient. PROVISIONAL: 0 as in TRL's default and DAPO
+  num_updates: 1               # optimizer updates per sampled batch
+
+eval:
+  every: 50                    # validation accuracy every this many steps; the best step is kept
+  val_problems: 500            # all of the validation split
+  test_problems: null          # null = the whole test split (1319); a number is for smoke runs only
+  batch_size: 64
+  max_new_tokens: 512          # greedy decoding, same prompt as training
+
+results_dir: results

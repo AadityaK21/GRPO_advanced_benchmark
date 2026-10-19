@@ -1,0 +1,3 @@
+# 0. Vanilla GRPO (arXiv 2402.03300). The baseline: base.yaml unchanged.
+advantage:
+  name: vanilla

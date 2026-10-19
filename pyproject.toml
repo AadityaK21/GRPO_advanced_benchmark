@@ -10,8 +10,9 @@ dependencies = [
     "trl==1.15.0",
     "datasets>=5.1",
     "numpy",
+    "pyyaml",
 ]
 
 [project.optional-dependencies]
 lora = ["peft"]
-dev = ["pytest", "gymnasium", "matplotlib"]
+dev = ["pytest", "gymnasium", "matplotlib", "scipy"]

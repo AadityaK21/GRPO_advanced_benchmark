@@ -1,0 +1,5 @@
+# 1. Dr. GRPO (arXiv 2503.20783, section 3.2). No std in the advantage, no per-completion length in the loss.
+advantage:
+  name: dr_grpo
+loss:
+  loss_type: dr_grpo           # sum over counted tokens / (completions x sampling.max_new_tokens)

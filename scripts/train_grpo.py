@@ -14,7 +14,6 @@ Short smoke run anywhere (CPU is fine, just slow):
 from __future__ import annotations
 
 import argparse
-import copy
 import json
 import os
 import random
@@ -30,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # so `import src.
 
 from src.reward.gsm8k import exact_match_reward  # noqa: E402
 from src.train.loop import GRPOSettings, grpo_step  # noqa: E402
+from src.train.model import AdapterOff, load_policy, pick_dtype  # noqa: E402,F401
 
 # Appended to every question. A choice that can change results: record it in implementation-notes.md.
 INSTRUCTION = 'Let\'s think step by step and output the final answer after "####".'
@@ -84,69 +84,9 @@ def format_prompt(tokenizer, question: str) -> str:
     return tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
 
 
-class AdapterOff(torch.nn.Module):
-    """The reference model for LoRA runs: the same model with the adapter switched off, so no second
-    copy sits in memory. per_token_logps calls it with gradients off. get_decoder and
-    get_output_embeddings let it score in chunks like the model itself."""
-
-    def __init__(self, peft_model):
-        super().__init__()
-        self.peft_model = peft_model
-
-    def forward(self, *args, **kwargs):
-        with self.peft_model.disable_adapter():
-            return self.peft_model(*args, **kwargs)
-
-    def get_decoder(self):
-        return _WithAdapterOff(self.peft_model, self.peft_model.get_decoder())
-
-    def get_output_embeddings(self):
-        return _WithAdapterOff(self.peft_model, self.peft_model.get_output_embeddings())
-
-
-class _WithAdapterOff(torch.nn.Module):
-    """Runs one part of a PEFT model (its body or its output layer) with the adapter switched off."""
-
-    def __init__(self, peft_model, part):
-        super().__init__()
-        self._peft = [peft_model]     # a list, so it is not registered as a submodule twice
-        self.part = part
-
-    def forward(self, *args, **kwargs):
-        with self._peft[0].disable_adapter():
-            return self.part(*args, **kwargs)
-
-
-def pick_dtype(device: str) -> torch.dtype:
-    # bf16 only where the GPU has it natively (A100, L4, RTX 30/40...). Kaggle's T4 does not: use fp32 there.
-    if device == "cuda" and torch.cuda.is_bf16_supported(including_emulation=False):
-        return torch.bfloat16
-    return torch.float32
-
-
 def build(args, device):
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer or args.model)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(args.model, dtype=pick_dtype(device)).to(device)
-    if not args.no_grad_ckpt:
-        # Keep only each layer's input during the forward pass and recompute the rest in backward.
-        # It only acts in train mode; sampling switches to eval mode by itself.
-        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
-    ref_model = None
-    if args.lora_r > 0:
-        from peft import LoraConfig, get_peft_model
-        lora = LoraConfig(r=args.lora_r, lora_alpha=2 * args.lora_r, lora_dropout=0.0,  # dropout 0: log-probs
-                          target_modules="all-linear", task_type="CAUSAL_LM")             # must be deterministic
-        model = get_peft_model(model, lora)
-        if args.beta != 0.0:
-            ref_model = AdapterOff(model)
-    elif args.beta != 0.0:
-        ref_model = copy.deepcopy(model).eval().requires_grad_(False)
-    model.train()   # Qwen2.5 has no dropout, so train and eval mode give the same log-probs
-    return model, tokenizer, ref_model
+    return load_policy(args.model, device, tokenizer_name=args.tokenizer, gradient_checkpointing=not args.no_grad_ckpt,
+                       lora_r=args.lora_r, need_ref=args.beta != 0.0)
 
 
 def main(argv=None) -> list[dict]:

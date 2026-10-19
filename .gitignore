@@ -5,3 +5,4 @@ __pycache__/
 .ipynb_checkpoints/
 .pytest_tmp/
 runs/
+results/**/ckpt/
