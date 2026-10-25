@@ -41,6 +41,13 @@ def setup(tmp_path_factory):
     rows = lambda ks: "\n".join(json.dumps({"question": f"t{k} t{k + 1}", "answer": f"#### {k % 7}"}) for k in ks)
     (tmp / "train.jsonl").write_text(rows(range(30)))
     (tmp / "test.jsonl").write_text(rows(range(30, 36)))
+    # Clusters for BV-Blend, made by scripts/make_clusters.py with a stand-in embedding (no download).
+    spec = importlib.util.spec_from_file_location("make_clusters", ROOT / "scripts" / "make_clusters.py")
+    mc = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mc)
+    questions = [f"t{k} t{k + 1}" for k in range(30)]
+    info = mc.make_clusters(questions, k=3, embed=lambda qs: [[float(q.split()[0][1:]) % 3, 0.0] for q in qs])
+    (tmp / "clusters.json").write_text(json.dumps(info))
     return tmp
 
 
@@ -50,7 +57,8 @@ def _args(setup, method, *extra):
             "budget.total_rollouts=8", "budget.micro_batch_size=3", "sampling.max_new_tokens=3",
             "reward.truncated_is_wrong=false",   # 3-token completions are nearly all cut off
             "eval.every=1",
-            "eval.val_problems=4", "eval.max_new_tokens=3", "eval.batch_size=3", f"results_dir={setup / 'results'}"]
+            "eval.val_problems=4", "eval.max_new_tokens=3", "eval.batch_size=3", f"results_dir={setup / 'results'}",
+            f"data.clusters_file={setup / 'clusters.json'}"]
     argv = ["--method", method, "--seed", "0", "--local-data", str(setup / "train.jsonl"), str(setup / "test.jsonl")]
     for s in sets:
         argv += ["--set", s]
@@ -109,8 +117,9 @@ def test_eval_only_is_the_base_model(setup):
     assert s["final"]["test_accuracy"] == s["best"]["test_accuracy"]
 
 
-@pytest.mark.parametrize("method", ["dapo", "rloo", "sign", "ngrpo", "softmax_grpo", "corpo", "mc_grpo", "two_grpo"])
-def test_every_tier1_method_runs_end_to_end(setup, method):
+@pytest.mark.parametrize("method", ["dapo", "rloo", "sign", "ngrpo", "softmax_grpo", "corpo", "mc_grpo", "two_grpo",
+                                    "ebpo", "krpo", "bv_blend", "ha_dw", "signbalance", "lens"])
+def test_every_method_runs_end_to_end(setup, method):
     run_dir = _load_script().main(_args(setup, method, "--no-ckpt"))
     s = json.loads((run_dir / "summary.json").read_text())
     train = [json.loads(line) for line in (run_dir / "train.jsonl").read_text().splitlines()]
@@ -143,3 +152,53 @@ def test_dapo_spends_its_whole_budget_on_mixed_groups(setup):
     assert sum(r["refills"] for r in train) > 0
     lrs = [r["lr"] for r in train]
     assert lrs == sorted(lrs, reverse=True) and lrs[0] > lrs[-1], "lr decays with the rollouts spent"
+
+
+def test_smoke_all_runs_every_method_and_reports_one_table(setup, monkeypatch, tmp_path):
+    spec = importlib.util.spec_from_file_location("smoke_all", ROOT / "scripts" / "smoke_all.py")
+    smoke = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(smoke)
+    monkeypatch.setattr(smoke, "_load_run", _load_script)        # the easy reward, so updates happen
+    argv = _args(setup, "vanilla")
+    sets = [argv[i + 1] for i, a in enumerate(argv) if a == "--set"]
+    out = tmp_path / "table.md"
+    rows = smoke.main(["--no-smoke", "--out", str(out), "--local-data", str(setup / "train.jsonl"),
+                       str(setup / "test.jsonl")] + [x for s in sets for x in ("--set", s)])
+    assert [r["method"] for r in rows] == smoke.all_methods() and len(rows) >= 10
+    bad = [(r["method"], r.get("error") or r["problems"]) for r in rows if not r.get("ok")]
+    assert not bad, bad
+    text = out.read_text()
+    assert text.count("\n") == len(rows) + 2 and "| two_grpo | yes | 2 |" in text
+
+
+def test_smoke_all_reports_a_crash_and_carries_on(setup, monkeypatch, tmp_path):
+    spec = importlib.util.spec_from_file_location("smoke_all", ROOT / "scripts" / "smoke_all.py")
+    smoke = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(smoke)
+    monkeypatch.setattr(smoke, "_load_run", _load_script)
+    argv = _args(setup, "vanilla")
+    sets = [argv[i + 1] for i, a in enumerate(argv) if a == "--set"]
+    rows = smoke.main(["--no-smoke", "--out", str(tmp_path / "t.md"), "--methods", "no_such_method", "vanilla",
+                       "--local-data", str(setup / "train.jsonl"), str(setup / "test.jsonl")]
+                      + [x for s in sets for x in ("--set", s)])
+    assert "error" in rows[0] and rows[1]["ok"]
+    assert "CRASH" in (tmp_path / "t.md").read_text()
+
+
+
+def test_make_clusters_records_what_it_did(setup):
+    info = json.loads((setup / "clusters.json").read_text())
+    assert info["cluster_ids"][:6] == [info["cluster_ids"][k] for k in (0, 1, 2, 3, 4, 5)]
+    assert len(set(info["cluster_ids"])) == 3 and sum(info["sizes"]) == 30 == info["n"]
+    # Points 0, 3, 6, ... share an embedding, so they share a cluster.
+    ids = info["cluster_ids"]
+    assert len({ids[k] for k in range(0, 30, 3)}) == 1
+
+
+def test_a_clusters_file_from_other_questions_is_refused(setup, tmp_path):
+    bad = json.loads((setup / "clusters.json").read_text())
+    bad["questions_sha1"] = "0" * 40
+    (tmp_path / "bad.json").write_text(json.dumps(bad))
+    argv = _args(setup, "bv_blend") + ["--set", f"data.clusters_file={tmp_path / 'bad.json'}"]
+    with pytest.raises(ValueError, match="other questions"):
+        _load_script().main(argv)

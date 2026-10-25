@@ -6,7 +6,8 @@ A method is one file in src/advantages/, named after the method (vanilla.py, dr_
 
 and, only if it needs them:
 
-    NEEDS = ("seq_logps",)   # extra inputs the loop must compute (see AdvantageBatch)
+    NEEDS = ("seq_logps",)   # extra inputs the loop must compute (see AdvantageBatch): "seq_logps"
+                             # (LENS) or "cluster_ids" (BV-Blend, from data.clusters_file)
     EXTRA_ROLLOUTS = 1       # completions sampled per prompt on top of the group size (MC-GRPO);
                              # they count against the rollout budget like any other
     GROUP_SIZE = 2           # the only group size the method is defined at (2-GRPO). The run script
@@ -30,7 +31,7 @@ from dataclasses import dataclass, field
 
 import torch
 
-KNOWN_NEEDS = {"seq_logps"}
+KNOWN_NEEDS = {"seq_logps", "cluster_ids"}
 
 
 @dataclass(frozen=True)

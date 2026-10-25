@@ -66,7 +66,10 @@ def test_every_method_file_follows_the_interface():
         cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "configs" / "methods" / f"{name}.yaml").read_text())
         method = build_advantage(cfg["advantage"]["name"], cfg["advantage"].get("params"))
         g = (method.group_size or 4) + method.extra_rollouts
-        adv, keep = method(_batch([1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0][: 2 * g], group_size=g))
+        extra = {"seq_logps": -torch.arange(1.0, 2 * g + 1)} if "seq_logps" in method.needs else {}
+        if "cluster_ids" in method.needs:
+            extra["cluster_ids"] = torch.tensor([0, 1])
+        adv, keep = method(_batch([1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0][: 2 * g], group_size=g, **extra))
         assert adv.shape == (2 * g,) and adv.dtype == torch.float32 and torch.isfinite(adv).all(), name
 
 
@@ -265,3 +268,132 @@ def test_dapo_config():
     assert cfg["filter"]["drop_uniform_groups"] is True
     assert cfg["advantage"]["params"]["l_max"] == cfg["sampling"]["max_new_tokens"]
     assert load_config("vanilla")["filter"]["drop_uniform_groups"] is False
+
+
+# ---- Tier 2 methods: worked examples in docs/method-specs-tier2.md -----------------------------------
+
+def _lens(rewards, logps, lengths=(10, 20, 30, 40), **params):
+    k = len(rewards) // 4
+    batch = AdvantageBatch(rewards=torch.tensor(rewards, dtype=torch.float32), group_size=4,
+                           prompt_ids=torch.arange(k), lengths=torch.tensor(list(lengths) * k),
+                           seq_logps=torch.tensor(logps, dtype=torch.float32))
+    return build_advantage("lens", params)(batch)[0]
+
+
+P1, P2 = [-10.0, -20.0, -30.0, -40.0], [-5.0, -15.0, -25.0, -35.0]
+
+
+def test_lens_spec_examples():
+    # 2510.08696 sec. 5.1. Equal per-token confidence or one wrong answer: the same as vanilla GRPO.
+    _close(_lens([1, 0, 0, 0], P1), [1.4998, -0.4999, -0.4999, -0.4999])
+    _close(_lens([1, 1, 1, 0], P2), [0.4999, 0.4999, 0.4999, -1.4997])
+    # Wrong answers of different confidence: the most confident (highest per-token prob) is pushed down most.
+    adv = _lens([1, 0, 0, 0], P2)
+    _close(adv, [1.4994, -0.5280, -0.4933, -0.4781])
+    assert adv[1] < adv[2] < adv[3]
+
+
+def test_lens_trains_on_all_wrong_groups():
+    # All wrong, unequal confidence: de-meaned calibrated rewards times alpha = 0.25.
+    _close(_lens([0, 0, 0, 0], P2), [-0.0200, 0.0026, 0.0076, 0.0098])
+    _close(_lens([0, 0, 0, 0], P2, alpha=1.0), [-0.0800, 0.0105, 0.0304, 0.0391])
+    _close(_lens([0, 0, 0, 0], P1), [0, 0, 0, 0])            # equal confidence: nothing to prefer
+    _close(_lens([1, 1, 1, 1], P2), [0, 0, 0, 0])            # all right: 0, as vanilla
+
+
+def test_lens_survives_extreme_log_probs():
+    # 1 / pi_old overflows for long answers: D_imp is computed in log space.
+    adv = _lens([1, 0, 0, 0], [-5000.0, -20.0, -30.0, -40.0], lengths=(1000, 20, 30, 40))
+    assert torch.isfinite(adv).all()
+
+
+def test_lens_needs_log_probs():
+    method = build_advantage("lens")
+    assert method.needs == ("seq_logps",)
+    with pytest.raises(ValueError, match="seq_logps"):
+        method(_batch([1.0, 0.0, 0.0, 0.0], 4))
+
+
+
+def _seq(name, steps, **params):
+    """Run a stateful method over several steps: [(rewards, prompt_ids, cluster_ids or None), ...]."""
+    method = build_advantage(name, params)
+    out = []
+    for k, (rewards, pids, cids) in enumerate(steps):
+        b = AdvantageBatch(rewards=torch.tensor(rewards, dtype=torch.float32), group_size=4,
+                           prompt_ids=torch.tensor(pids), lengths=torch.full((len(rewards),), 10), step=k,
+                           cluster_ids=None if cids is None else torch.tensor(cids))
+        out.append(method(b)[0])
+    return out, method.state
+
+
+def test_ebpo_spec_example():
+    # 2602.05165 eqs. 2-4, Algorithm 1: running stats updated with the batch first, then S, then batch norm.
+    (a0, a1, a2), st = _seq("ebpo", [([1, 0, 0, 0, 1, 1, 1, 0], [0, 1], None),
+                                     ([0, 0, 0, 0, 1, 1, 0, 0], [0, 2], None),
+                                     ([0, 0, 0, 0], [0], None)])
+    _close(a0, [1.3931, -0.7206, -0.7206, -0.7206, 0.7206, 0.7206, 0.7206, -1.3931])
+    # An all-wrong group next to a mixed one is pushed DOWN (vanilla would give it 0).
+    _close(a1, [-0.2397, -0.2397, -0.2397, -0.2397, 1.5181, 1.5181, -1.0387, -1.0387])
+    _close(a2, [0, 0, 0, 0])                                   # one uniform group: batch std 0, A = 0
+    assert (st["glob_n"], st["means_n"]) == (20, 5) and abs(st["S_last"] - 0.3422) < 1e-4
+
+
+def test_ebpo_global_mean_cancels():
+    # After batch centring, mu_glob drops out: A = ((r - mu_g) + S (mu_g - batch mean)) / std.
+    method = build_advantage("ebpo")
+    r = (torch.rand(32, generator=torch.Generator().manual_seed(4)) > 0.4).float()
+    adv, _ = method(AdvantageBatch(rewards=r, group_size=4, prompt_ids=torch.arange(8), lengths=torch.ones(32)))
+    S, g = method.state["S_last"], r.view(8, 4).double()
+    raw = (g - g.mean(1, keepdim=True) + S * (g.mean(1, keepdim=True) - g.mean())).flatten()
+    torch.testing.assert_close(adv, (raw / (raw.std() + 1e-4)).float(), atol=1e-5, rtol=0)
+
+
+def test_krpo_spec_example():
+    # 2505.07527 eqs. 1-6 with the code's x0 = 0, P0 = 1, Q = 1e-5, R = 1e-2, eps = 1e-8. Reset per group.
+    (a0, a1), st = _seq("krpo", [([1, 0, 0, 0, 1, 1, 1, 0], [0, 1], None), ([1, 1, 0, 0], [0], None)])
+    _close(a0, [0.0995, -7.0481, -5.7514, -4.9725, 0.0995, 0.0705, 0.0575, -14.9376])
+    _close(a1, [0.0995, 0.0705, -11.5085, -9.9501])
+    assert st == {}, "nothing carries over between steps"
+    # Row order matters, and a wrong answer after only wrong answers gets 0.
+    (a,), _ = _seq("krpo", [([0, 0, 0, 1, 1, 1, 1, 1], [0, 1], None)])
+    _close(a, [0, 0, 0, 14.9873, 0.0995, 0.0705, 0.0575, 0.0497])
+
+
+def test_ha_dw_spec_example():
+    # 2601.08521 eqs. 7-17 at lambda 1.3 and the TRL PR's eta 0.1, m 10; C starts at the first batch's accuracy.
+    (a0, a1), st = _seq("ha_dw", [([1, 0, 0, 0, 1, 1, 1, 0], [0, 1], None), ([0, 0, 0, 0, 1, 1, 0, 0], [2, 3], None)],
+                        lam=1.3, eta=0.1, m=10)
+    _close(a0, [2.5033, -0.5061, -0.5061, -0.5061, 0.5061, 0.5061, 0.5061, -2.5033])
+    _close(a1, [0, 0, 0, 0, 1.1256, 1.1256, -1.1256, -1.1256])   # p_hat = C: weight is just lambda
+    assert st["C"] == pytest.approx(0.475) and st["hist"] == pytest.approx([0.5, 0.475])
+    # Our default eta = 10 gives the same advantages here (they use the prior C) but a faster-moving anchor.
+    (b0, b1), st10 = _seq("ha_dw", [([1, 0, 0, 0, 1, 1, 1, 0], [0, 1], None), ([0, 0, 0, 0, 1, 1, 0, 0], [2, 3], None)])
+    torch.testing.assert_close(b1, a1)
+    assert st10["C"] == 0.25
+
+
+def test_signbalance_spec_example():
+    # 2609.04063 eq. 11: +1 right, -n+/n- wrong, per group; all-wrong 0; all-right +1 as Algorithm 2 is written.
+    adv, _ = _adv("signbalance", ONE + THREE + NONE + [1.0] * 4, 4)
+    _close(adv, [1, -1 / 3, -1 / 3, -1 / 3, 1, 1, 1, -3, 0, 0, 0, 0, 1, 1, 1, 1])
+    torch.testing.assert_close(adv.view(4, 4)[:3].sum(dim=1), torch.zeros(3))
+    zero, _ = _adv("signbalance", [1.0] * 4, 4, all_correct="zero")
+    _close(zero, [0, 0, 0, 0])
+
+
+def test_bv_blend_spec_example():
+    # 2606.28707 eqs. 5-12. Step 0: cluster 0 unseen, w = 0, exactly vanilla; then initialised from the
+    # pooled rollouts. Step 1: an all-wrong group in that cluster gets a NEGATIVE advantage (vanilla: 0).
+    (a0, a1), st = _seq("bv_blend", [([1, 0, 0, 0, 1, 1, 1, 0], [0, 1], [0, 0]), ([0, 0, 0, 0], [2], [0])])
+    _close(a0, [1.4997, -0.4999, -0.4999, -0.4999, 0.4999, 0.4999, 0.4999, -1.4997])
+    _close(a1, [-0.4344, -0.4344, -0.4344, -0.4344])
+    assert abs(st["m1"][0].item() - 0.05) < 1e-12 and abs(st["n_eff"][0].item() - 4.4) < 1e-12
+    assert st["seen"].tolist()[:2] == [True, False]
+
+
+def test_bv_blend_needs_clusters():
+    with pytest.raises(ValueError, match="cluster_ids"):
+        build_advantage("bv_blend")(_batch([1.0, 0.0, 0.0, 0.0], 4))
+    with pytest.raises(ValueError, match="cluster ids must be"):
+        build_advantage("bv_blend", {"n_clusters": 2})(_batch([1.0, 0.0, 0.0, 0.0], 4, cluster_ids=torch.tensor([5])))

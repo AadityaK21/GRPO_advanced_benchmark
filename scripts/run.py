@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import random
 import sys
@@ -34,7 +35,8 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")   #
 
 import torch  # noqa: E402
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
 from src.advantages.base import build_advantage  # noqa: E402
 from src.config import load_config  # noqa: E402
@@ -103,6 +105,10 @@ def main(argv=None) -> Path:
 
     # ---- budget ---------------------------------------------------------------------------------
     b = cfg["budget"]
+    cluster_of = None
+    if "cluster_ids" in advantage.needs and not args.eval_only:
+        path = Path(cfg["data"]["clusters_file"])
+        cluster_of = load_clusters(path if path.is_absolute() else ROOT / path, [r["question"] for r in data["train"]])
     per_prompt = b["group_size"] + advantage.extra_rollouts
     prompts_per_step = max(1, b["rollouts_per_step"] // per_prompt)
     rollouts_per_step = prompts_per_step * per_prompt
@@ -192,7 +198,7 @@ def main(argv=None) -> Path:
                               exact_match_reward, settings, ref_model, advantage=advantage,
                               prompt_ids=[r["idx"] for r in rows], step=step,
                               refill=refill if dynamic else None,
-                              max_rollouts=b["total_rollouts"] - rollouts)
+                              max_rollouts=b["total_rollouts"] - rollouts, cluster_of=cluster_of)
             rollouts += stats["rollouts"]
             scheduler.step()
             step_times.append(time.perf_counter() - t0)
@@ -258,6 +264,21 @@ def main(argv=None) -> Path:
     print(f"test accuracy: final {final['accuracy']:.4f}, best (step {best['step']}) {best_test['accuracy']:.4f}  "
           f"| {summary['wall_clock_seconds'] / 60:.1f} min  | {run_dir}", flush=True)
     return run_dir
+
+
+def load_clusters(path: Path, train_questions: list[str]) -> torch.Tensor:
+    """cluster_of[i] = the cluster of GSM8K train problem i, from the file scripts/make_clusters.py writes.
+    Refuses a file made from different questions (it records a hash of them)."""
+    if not path.exists():
+        raise FileNotFoundError(f"{path} not found: run `python scripts/make_clusters.py` once (needs the "
+                                "sentence-transformers and scikit-learn packages)")
+    info = json.loads(path.read_text())
+    ids = torch.tensor(info["cluster_ids"], dtype=torch.long)
+    sha = hashlib.sha1("\n".join(train_questions).encode("utf-8")).hexdigest()
+    if ids.numel() != len(train_questions) or info.get("questions_sha1") != sha:
+        raise ValueError(f"{path} was made from other questions ({ids.numel()} ids) than this run's GSM8K train "
+                         f"({len(train_questions)} problems): re-run scripts/make_clusters.py")
+    return ids
 
 
 def _finite(x: float) -> bool:

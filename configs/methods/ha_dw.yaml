@@ -1,0 +1,7 @@
+# 13. HA-DW (arXiv 2601.08521, eqs. 7-17). Vanilla times exp(-sgn(A) (p_hat - C)), C a running success-rate anchor.
+advantage:
+  name: ha_dw
+  params:
+    lam: 1.3
+    eta: 10.0                  # PROVISIONAL: the paper gives no value; compare 0.1 (TRL PR) on validation
+    m: 10

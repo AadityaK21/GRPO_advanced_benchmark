@@ -1,0 +1,6 @@
+# 11. KRPO (arXiv 2505.07527, eqs. 1-6). A Kalman filter over each group's rewards in row order, reset per group.
+advantage:
+  name: krpo
+  params:
+    Q: 1.0e-5
+    R: 1.0e-2

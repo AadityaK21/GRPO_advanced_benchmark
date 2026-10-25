@@ -1,0 +1,6 @@
+# 14. SignBalance (arXiv 2609.04063, eq. 11). +1 for right, -n+/n- for wrong, per group.
+advantage:
+  name: signbalance
+  params:
+    c: 1.0
+    all_correct: plus_c        # Algorithm 2 as written; `zero` is the sensitivity check

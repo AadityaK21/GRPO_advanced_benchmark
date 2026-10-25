@@ -1,0 +1,5 @@
+# 15. LENS (arXiv 2510.08696, section 5.1). Confident wrong answers penalised more; all-wrong groups kept at weight alpha.
+advantage:
+  name: lens
+  params:
+    alpha: 0.25

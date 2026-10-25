@@ -462,3 +462,20 @@ def test_padding_a_refill_does_not_change_its_log_probs():
     am0 = torch.cat([REFILL_BATCH["prompt_mask"], REFILL_BATCH["completion_mask"]], dim=1)
     plain = per_token_logps(model, ids0, am0, 3, 1.0) * REFILL_BATCH["completion_mask"]
     torch.testing.assert_close(padded, plain, rtol=1e-5, atol=1e-5)
+
+
+def test_cluster_ids_come_from_the_prompt_ids(monkeypatch):
+    seen = {}
+
+    def spy(batch, state):
+        seen["clusters"] = batch.cluster_ids
+        return torch.zeros_like(batch.rewards)
+
+    method = Advantage(name="spy", fn=spy, needs=("cluster_ids",))
+    cluster_of = torch.zeros(2000, dtype=torch.long)
+    cluster_of[1234], cluster_of[99] = 7, 3
+    _update(monkeypatch, GRPOSettings(group_size=4, max_new_tokens=8), advantage=method, prompt_ids=[1234, 99],
+            cluster_of=cluster_of)
+    assert seen["clusters"].tolist() == [7, 3]
+    with pytest.raises(ValueError, match="cluster"):
+        _update(monkeypatch, GRPOSettings(group_size=4, max_new_tokens=8), advantage=method, prompt_ids=[1, 2])

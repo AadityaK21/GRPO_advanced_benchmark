@@ -32,6 +32,8 @@ pip install torch==2.14.1 transformers==5.19.0 trl==1.15.0 datasets peft pyyaml 
 pytest                                                           # all tests, CPU, under a minute
 
 python scripts/run.py --method vanilla --seed 0 --smoke          # whole pipeline in a few minutes
+python scripts/smoke_all.py                                      # every method, smoke size, one table
+                                                                 # (on Kaggle: notebooks/kaggle_smoke_all.ipynb)
 python scripts/run.py --method vanilla --seed 0                  # one benchmark run
 python scripts/run.py --method dr_grpo --seed 0 --set budget.group_size=4
 python scripts/run.py --method two_grpo --seed 0 --set budget.group_size=2   # 2-GRPO runs only at G = 2
@@ -40,7 +42,9 @@ python scripts/aggregate.py                                      # IQM table and
 ```
 
 Tier 1 methods (`--method`): `vanilla`, `dr_grpo`, `dapo`, `rloo`, `sign`, `ngrpo`, `softmax_grpo`, `corpo`,
-`mc_grpo`, `two_grpo`. Their free parameters (`softmax_grpo` tau, `corpo` c) are tuned with
+`mc_grpo`, `two_grpo`. Tier 2: `ebpo`, `krpo`, `bv_blend`, `ha_dw`, `signbalance`, `lens`. What each paper
+specifies: `docs/method-specs.md` and `docs/method-specs-tier2.md`. `bv_blend` needs prompt clusters, made
+once with `python scripts/make_clusters.py` (sentence-transformers, scikit-learn). Their free parameters (`softmax_grpo` tau, `corpo` c) are tuned with
 `--set advantage.params.tau=0.3` and the like, inside the equal tuning budget.
 
 Each run writes `results/<method>/g<group size>/seed<seed>-<time>/`: the full config, the seed, the git

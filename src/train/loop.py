@@ -38,7 +38,7 @@ class GRPOSettings:
 def grpo_step(model, optimizer, tokenizer, prompts: list[str], answers: list[str], reward_fn,
               settings: GRPOSettings, ref_model=None, advantage: Advantage | None = None,
               prompt_ids: list[int] | None = None, step: int = 0, refill=None,
-              max_rollouts: int | None = None) -> dict:
+              max_rollouts: int | None = None, cluster_of=None) -> dict:
     """Sample, score, compute advantages, then make settings.num_updates updates on the GRPO loss.
 
     - reward_fn(texts, completion_answers), both lists passed positionally, returns one float per
@@ -47,6 +47,8 @@ def grpo_step(model, optimizer, tokenizer, prompts: list[str], answers: list[str
     - advantage: the method. None means vanilla GRPO with settings.scale.
     - prompt_ids: each prompt's index in the training set, for methods that track prompts across
       steps. Defaults to 0 .. len(prompts) - 1.
+    - cluster_of: a LongTensor, cluster_of[prompt_id] = that prompt's semantic cluster. Needed only by
+      methods that ask for "cluster_ids" (BV-Blend).
     - refill(n) -> (prompts, answers, prompt_ids): the next n training prompts. Used only with
       settings.drop_uniform_groups (DAPO's dynamic sampling): groups whose rewards are all equal are
       dropped, and fresh prompts are sampled until len(prompts) groups have mixed rewards, or
@@ -151,6 +153,7 @@ def grpo_step(model, optimizer, tokenizer, prompts: list[str], answers: list[str
             rewards=rewards, group_size=G, prompt_ids=torch.as_tensor(prompt_ids, dtype=torch.long),
             lengths=cmask.sum(dim=1).cpu(), step=step,
             seq_logps=(old_logps * cmask).sum(dim=1).cpu() if needs_logps else None,
+            cluster_ids=_clusters(cluster_of, prompt_ids) if "cluster_ids" in advantage.needs else None,
         )
         advantages, keep = advantage(adv_batch)
     advantages = advantages.to(device)
@@ -255,3 +258,9 @@ def _cat_batches(a: dict, b: dict, pad_id: int) -> dict:
         if key not in out:                                       # per-row flags such as "truncated"
             out[key] = torch.cat([a[key], b[key]])
     return out
+
+
+def _clusters(cluster_of, prompt_ids) -> torch.Tensor:
+    if cluster_of is None:
+        raise ValueError("this method needs cluster_ids: pass cluster_of (scripts/run.py loads data.clusters_file)")
+    return torch.as_tensor(cluster_of, dtype=torch.long)[torch.as_tensor(prompt_ids, dtype=torch.long)]

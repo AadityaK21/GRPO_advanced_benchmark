@@ -1,0 +1,3 @@
+# 10. EBPO (arXiv 2602.05165, eqs. 2-4). Baseline shrunk to the global mean by a running empirical-Bayes S; batch-normalised.
+advantage:
+  name: ebpo

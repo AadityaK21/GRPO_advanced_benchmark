@@ -24,12 +24,12 @@ All sixteen arXiv IDs and titles checked on 11 Oct 2026. "Official code" and "Be
 | 7 | CoRPO | 2511.04439 | 1 | none in abstract | a correctness threshold | `corpo.py` | `test_corpo_threshold` | |
 | 8 | MC-GRPO | 2601.22582 | 1 | github.com/lotusroot-kim/MC-GRPO | one extra rollout per prompt; count it in the budget | `mc_grpo.py` | `test_mc_grpo_*` | |
 | 9 | 2-GRPO | 2510.00977 | 1 | none in abstract | group size 2 only | `two_grpo.py` | `test_two_grpo_is_vanilla_at_group_size_2_only` | |
-| 10 | EBPO | 2602.05165 | 2 | none in abstract | a running global prior (state) | | | |
-| 11 | KRPO | 2505.07527 | 2 | github.com/billhhh/KRPOLLMsRL | a per-prompt Kalman filter (state) | | | |
-| 12 | BV-Blend | 2606.28707 | 2 | none in abstract | semantic prompt clusters plus running statistics (state) | | | |
-| 13 | HA-DW | 2601.08521 | 2 | none in abstract | an evolving difficulty anchor (state) | | | |
-| 14 | SignBalance | 2609.04063 | 2 | "will be released" | per-class rescaling; reports parity with GRPO on open-answer math | | | |
-| 15 | LENS | 2510.08696 | 2 | none in abstract | each response's likelihood | | | |
+| 10 | EBPO | 2602.05165 | 2 | none found | a running global prior (state) | `ebpo.py` | `test_ebpo_*` | |
+| 11 | KRPO | 2505.07527 | 2 | github.com/billhhh/KRPO_LLMs_RL @ 8839aaa | a Kalman filter over each group, reset per group (no state) | `krpo.py` | `test_krpo_spec_example` | |
+| 12 | BV-Blend | 2606.28707 | 2 | none found | semantic prompt clusters plus running statistics (state) | `bv_blend.py` + `scripts/make_clusters.py` | `test_bv_blend_*` | |
+| 13 | HA-DW | 2601.08521 | 2 | none official (TRL PR #4872, unmerged) | an evolving difficulty anchor (state) | `ha_dw.py` | `test_ha_dw_spec_example` | |
+| 14 | SignBalance | 2609.04063 | 2 | "will be released"; none found 25 Oct 2026 | per-class rescaling; reports parity with GRPO on open-answer math | `signbalance.py` | `test_signbalance_spec_example` | |
+| 15 | LENS | 2510.08696 | 2 | none found | each response's likelihood | `lens.py` | `test_lens_*` | |
 
 Our code: the file under `src/advantages/`. Unit test: its name in `tests/test_advantages.py`.
 
@@ -135,6 +135,13 @@ Newest first. One line for every decision that could change a number.
 
 | Date | Method | Decision | Why | Re-run needed? |
 |---|---|---|---|---|
+| 2026-10-25 | Tier 2 | Implemented from `docs/method-specs-tier2.md` (one agent per paper; every worked example reproduced to 4 decimals). Re-read each paper before Gate 2: arXiv was reached only through a fetch tool | Specs need a human check before they cost GPU time | Not yet run |
+| 2026-10-25 | EBPO | sigma^2 pooled over all rewards (Algorithm 1), n - 1 everywhere, 1e-4, stats updated before S, no decay; the plain estimator (EBPO-naive), not the topic-ordered stream | Algorithm 1; the topic ordering is a sampler change | Not yet run |
+| 2026-10-25 | KRPO | Filter per group, reset each group, rows in sampling order; code's x0 0, P0 1, Q 1e-5, R 1e-2, eps 1e-8; no rescaling | Sec. 5.1 and the code. Its advantages are ~10x vanilla's: the lr sweep and the shared clip must absorb it | Not yet run |
+| 2026-10-25 | BV-Blend | gamma 0.9 on the NEW batch (eq. 6 as written), T 0.1, N0 8, V_prior 0.25, delta_N 1, 1e-4, sample std; clusters: raw GSM8K train questions, all-MiniLM-L6-v2 (Hub commit recorded in the file), k-means K 16 seed 0; `run.py` refuses a clusters file made from other questions | Paper gives only gamma and delta; the rest are our choices, recorded | Not yet run |
+| 2026-10-25 | HA-DW | lambda 1.3, m 10, C starts at the first batch's accuracy and the weight applies from step 1, sigma 1 until two anchors exist, eta_t clamped to [0, 1]; eta 10 PROVISIONAL | With eta 0.1 (TRL PR) the anchor freezes near the first batch's accuracy (agent's simulation) | Not yet run |
+| 2026-10-25 | SignBalance | c 1, counts per group, all-right groups +1 (Algorithm 2 as written), no epsilon | `all_correct: zero` kept as the sensitivity check | Not yet run |
+| 2026-10-25 | LENS | Sec. 5.1 version: D_imp from raw probabilities in log space, floor over all G, 1/G on every wrong answer, mixed groups vanilla on r~, all-wrong groups alpha x de-meaned, alpha 0.25 at every G | As printed; alpha was set at G = 16 and never ablated | Not yet run |
 | 2026-10-25 | all | A completion with no counted tokens (a keep-mask row) is out of the loss entirely, including the per-completion denominators of `grpo` and `dr_grpo` | MC-GRPO trains on G of its G + 1 completions; without this, the dropped row would shrink every other row's weight by G/(G+1). No effect without a keep-mask (every sampled row has at least one counted token), so earlier results and the TRL match stand | No |
 | 2026-10-25 | DAPO | Dynamic sampling refills only the missing groups (not a whole new batch as verl does), stops after `filter.max_refills` = 10 rounds or when the next round would pass the budget, and trains on whatever mixed groups it has; zero mixed groups = no update, rollouts still counted | Every rollout counts against the same budget as every other method; sampling only the deficit wastes none. The run ends when the budget is spent, and the lr decays with rollouts spent, not steps | Not yet run |
 | 2026-10-25 | DAPO | Overlong shaping at L_max 512, L_cache 102, penalty x0.5; filtered on accuracy before shaping | Same L_cache / L_max ratio as the paper (0.2); x0.5 because DAPO's reward is +-1 and ours 0/1 (our derivation); the verl code filters on accuracy | Not yet run |
@@ -158,6 +165,12 @@ Newest first. One line for every decision that could change a number.
 - [ ] MC-GRPO under 0/1 rewards: MAD is always 0, so A = +-1/eps on minority completions only. Email the author: is that intended, and what eps? (Paper silent; code 1e-3)
 - [ ] SoftmaxGRPO's tau: tune in {0.1, 0.3} on validation (paper's 0.1 was picked on test accuracy)
 - [x] DAPO: refill loop for dynamic sampling built (every rollout counted, budget never passed) and overlong shaping at 512 tokens (L_cache 102, penalty x0.5). 25 Oct 2026
+- [ ] HA-DW's eta: 10 (ours) or 0.1 (TRL PR, where the anchor freezes)? Compare on validation inside the tuning budget
+- [ ] BV-Blend's T (0.1 ours; paper silent): include {0.05, 0.1, 0.2} in its tuning trials. Log mean w and max |A| per step
+- [ ] SignBalance on all-right groups: +1 (ours, Algorithm 2) vs 0. Run `all_correct=zero` as a sensitivity check at G = 4
+- [ ] KRPO's scale (max |A| ~15-36): check its lr sweep covers 10x smaller lrs than vanilla's
+- [ ] LENS: re-read sec. 5.1 from the PDF (the agent only had a summarising fetch) before Gate 2
+- [ ] Run `scripts/make_clusters.py` once (Kaggle), commit `data/gsm8k_train_clusters_k16.json`
 - [ ] DAPO: the training `reward` it logs is over the kept (mixed) groups only. Compare its training curve with others on validation accuracy, not on that number
 - [ ] 
 
