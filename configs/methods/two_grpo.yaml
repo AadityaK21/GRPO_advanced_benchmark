@@ -1,0 +1,3 @@
+# 9. 2-GRPO (arXiv 2510.00977). Vanilla GRPO at group size 2 only: run with --set budget.group_size=2.
+advantage:
+  name: two_grpo

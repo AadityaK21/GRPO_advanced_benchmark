@@ -1,0 +1,5 @@
+# 8. MC-GRPO (arXiv 2601.22582, eqs. 2-6). G + 1 rollouts, median/MAD advantage, the median completion dropped.
+advantage:
+  name: mc_grpo
+  params:
+    eps: 1.0e-3

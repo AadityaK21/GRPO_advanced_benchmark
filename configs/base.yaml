@@ -1,5 +1,5 @@
 # Everything every condition shares. A method's own file, configs/methods/<name>.yaml, may set only
-# its `advantage` and `loss` sections (src/config.py enforces this). Changing a value here after
+# its `advantage`, `loss` and `filter` sections (src/config.py enforces this). Changing a value here after
 # Gate 1 means re-running every condition, so record each change in docs/implementation-notes.md.
 #
 # Values marked PROVISIONAL are set by the week-9 timing run and Gate 1, then frozen.
@@ -47,6 +47,11 @@ budget:                        # a fixed number of rollouts per run, not a fixed
   rollouts_per_step: 64        # completions per step; prompts per step = this // group size
   total_rollouts: 12800        # PROVISIONAL (200 steps at 64): set from the week-9 timing run
   micro_batch_size: 16         # completions per forward/backward pass. Memory only, not the maths
+
+filter:                        # which sampled groups train. A method's own file may set this (DAPO)
+  drop_uniform_groups: false   # DAPO's dynamic sampling: drop groups whose rewards are all equal and sample
+                               # fresh prompts until the batch is full. Every rollout counts in the budget
+  max_refills: 10              # extra sampling rounds per step at most (verl's max_num_gen_batches is 10)
 
 advantage:
   name: vanilla

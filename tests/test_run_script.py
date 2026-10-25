@@ -107,3 +107,39 @@ def test_eval_only_is_the_base_model(setup):
     s = json.loads((run_dir / "summary.json").read_text())
     assert s["steps"] == 0 and s["rollouts"] == 0 and not (run_dir / "train.jsonl").exists()
     assert s["final"]["test_accuracy"] == s["best"]["test_accuracy"]
+
+
+@pytest.mark.parametrize("method", ["dapo", "rloo", "sign", "ngrpo", "softmax_grpo", "corpo", "mc_grpo", "two_grpo"])
+def test_every_tier1_method_runs_end_to_end(setup, method):
+    run_dir = _load_script().main(_args(setup, method, "--no-ckpt"))
+    s = json.loads((run_dir / "summary.json").read_text())
+    train = [json.loads(line) for line in (run_dir / "train.jsonl").read_text().splitlines()]
+    if method == "mc_grpo":
+        # One extra rollout per prompt, paid for out of the budget: 4 per step fits 1 prompt x (2 + 1).
+        assert [r["rollouts_total"] for r in train] == [3, 6] and s["rollouts"] == 6
+    elif method == "dapo":
+        # Refills count too, and the run never passes its budget of 8.
+        assert s["rollouts"] <= 8 and all("groups_dropped" in r for r in train)
+        assert s["steps"] == len(train)
+    else:
+        assert s["rollouts"] == 8
+    assert all(r["grad_norm"] == r["grad_norm"] for r in train), "no NaN"
+
+
+def test_two_grpo_refuses_other_group_sizes(setup):
+    argv = _args(setup, "two_grpo") + ["--set", "budget.group_size=4", "--set", "budget.rollouts_per_step=8"]
+    with pytest.raises(ValueError, match="budget.group_size=2"):
+        _load_script().main(argv)
+
+
+def test_dapo_spends_its_whole_budget_on_mixed_groups(setup):
+    argv = _args(setup, "dapo", "--no-ckpt") + ["--set", "budget.total_rollouts=40"]
+    run_dir = _load_script().main(argv)
+    s = json.loads((run_dir / "summary.json").read_text())
+    train = [json.loads(line) for line in (run_dir / "train.jsonl").read_text().splitlines()]
+    assert 40 - 4 < s["rollouts"] <= 40, "it stops only when the next step would not fit"
+    assert s["rollouts"] == train[-1]["rollouts_total"] == sum(r["rollouts"] for r in train)
+    assert sum(r["groups_dropped"] for r in train) > 0, "the tiny model gives some uniform groups"
+    assert sum(r["refills"] for r in train) > 0
+    lrs = [r["lr"] for r in train]
+    assert lrs == sorted(lrs, reverse=True) and lrs[0] > lrs[-1], "lr decays with the rollouts spent"

@@ -149,3 +149,18 @@ def test_kl_pulls_the_policy_toward_the_reference(logp, ref, sign):
 def test_unknown_loss_type_is_an_error():
     with pytest.raises(ValueError):
         grpo_loss(torch.zeros(1, 1), None, torch.zeros(1), torch.ones(1, 1), loss_type="grpoo")
+
+
+@pytest.mark.parametrize("loss_type", ["grpo", "bnpo", "dapo", "dr_grpo"])
+def test_a_row_with_no_counted_tokens_is_not_in_the_loss(loss_type):
+    """A keep-mask drops a completion by zeroing its row of the mask (MC-GRPO). The loss must be the
+    loss of the other rows alone: the dropped row is not even in a denominator."""
+    g = torch.Generator().manual_seed(3)
+    logps = -torch.rand(6, 5, generator=g)
+    adv = torch.randn(6, generator=g)
+    mask = torch.ones(6, 5)
+    mask[0, 3:] = 0
+    keep = torch.tensor([True, True, False, True, True, True])
+    dropped = grpo_loss(logps, None, adv, mask * keep.unsqueeze(1), loss_type=loss_type, max_completion_length=5)
+    alone = grpo_loss(logps[keep], None, adv[keep], mask[keep], loss_type=loss_type, max_completion_length=5)
+    torch.testing.assert_close(dropped, alone)

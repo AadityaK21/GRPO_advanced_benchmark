@@ -30,11 +30,15 @@ class GRPOSettings:
                                          # gradients are summed so the update is the full batch's
     truncated_is_wrong: bool = False     # a completion cut off at max_new_tokens scores 0, whatever
                                          # number it ended on (as Dr. GRPO's code does)
+    drop_uniform_groups: bool = False    # DAPO's dynamic sampling: groups whose rewards are all equal are
+                                         # dropped and replaced by fresh prompts (needs `refill`)
+    max_refills: int = 10                     # sampling rounds after the first, per step
 
 
 def grpo_step(model, optimizer, tokenizer, prompts: list[str], answers: list[str], reward_fn,
               settings: GRPOSettings, ref_model=None, advantage: Advantage | None = None,
-              prompt_ids: list[int] | None = None, step: int = 0) -> dict:
+              prompt_ids: list[int] | None = None, step: int = 0, refill=None,
+              max_rollouts: int | None = None) -> dict:
     """Sample, score, compute advantages, then make settings.num_updates updates on the GRPO loss.
 
     - reward_fn(texts, completion_answers), both lists passed positionally, returns one float per
@@ -43,6 +47,12 @@ def grpo_step(model, optimizer, tokenizer, prompts: list[str], answers: list[str
     - advantage: the method. None means vanilla GRPO with settings.scale.
     - prompt_ids: each prompt's index in the training set, for methods that track prompts across
       steps. Defaults to 0 .. len(prompts) - 1.
+    - refill(n) -> (prompts, answers, prompt_ids): the next n training prompts. Used only with
+      settings.drop_uniform_groups (DAPO's dynamic sampling): groups whose rewards are all equal are
+      dropped, and fresh prompts are sampled until len(prompts) groups have mixed rewards, or
+      settings.max_refills rounds have run, or the next round would pass max_rollouts. Every sampled
+      completion counts in stats["rollouts"], kept or not. If fewer groups survive, the step trains on
+      those; if none survive, the model is not updated.
 
     Returns a dict of statistics:
         reward, clip_frac, kl, loss, completion_length, truncated_frac   (as before)
@@ -55,7 +65,8 @@ def grpo_step(model, optimizer, tokenizer, prompts: list[str], answers: list[str
         reward_var:     mean within-group reward variance (divides by G)
         entropy:        mean per-token entropy of the sampling distribution over counted tokens
         grad_norm:      gradient norm before clipping, last update
-        rollouts:       completions sampled this step (counts any extra rollouts)
+        rollouts:       completions sampled this step (counts any extra rollouts and every refill)
+        groups_kept, groups_dropped, refills:   dynamic sampling only (0 dropped otherwise)
     clip_frac, kl, entropy and grad_norm are from the last update. A token is clipped when its
     ratio is above 1 + eps_high with a positive advantage, or below 1 - eps_low with a negative one.
     """
@@ -64,19 +75,52 @@ def grpo_step(model, optimizer, tokenizer, prompts: list[str], answers: list[str
         raise ValueError("settings.beta != 0 needs a ref_model")
     G = st.group_size + (advantage.extra_rollouts if advantage is not None else 0)
 
-    # 1. Sample G completions per prompt from the current model.
-    batch = sample_group(model, tokenizer, prompts, G, st.max_new_tokens, st.temperature)
+    prompts, answers = list(prompts), list(answers)
+    prompt_ids = list(range(len(prompts))) if prompt_ids is None else list(prompt_ids)
+
+    def sample_and_score(ps, ans):
+        # 1. Sample G completions per prompt from the current model.
+        b = sample_group(model, tokenizer, ps, G, st.max_new_tokens, st.temperature)
+        # 2. Score them. Decode only the counted tokens; each completion is paired with the answer of
+        #    its own prompt (answers repeated G times in a row, matching the row layout).
+        texts = [tokenizer.decode(ids[: int(m.sum())], skip_special_tokens=True)
+                 for ids, m in zip(b["completion_ids"], b["completion_mask"])]
+        r = torch.as_tensor(reward_fn(texts, [a for a in ans for _ in range(G)]), dtype=torch.float32)
+        if st.truncated_is_wrong and "truncated" in b:
+            r = torch.where(b["truncated"].cpu(), torch.zeros_like(r), r)
+        return b, r
+
+    batch, rewards = sample_and_score(prompts, answers)
+    sampled, dropped, refills = rewards.numel(), 0, 0
+    if st.drop_uniform_groups:
+        target = len(prompts)
+        keep = _mixed_groups(rewards, G)
+        batch, rewards = _take_groups(batch, keep, G), rewards.view(-1, G)[keep].flatten()
+        prompts = [p for p, k in zip(prompts, keep) if k]
+        answers = [a for a, k in zip(answers, keep) if k]
+        prompt_ids = [i for i, k in zip(prompt_ids, keep) if k]
+        dropped += int((~keep).sum())
+        while len(prompts) < target and refill is not None and refills < st.max_refills:
+            need = target - len(prompts)
+            if max_rollouts is not None and sampled + need * G > max_rollouts:
+                break                                   # the next round would overrun the rollout budget
+            ps, ans, ids = refill(need)
+            more, r = sample_and_score(list(ps), list(ans))
+            refills += 1
+            sampled += r.numel()
+            k = _mixed_groups(r, G)
+            dropped += int((~k).sum())
+            if k.any():
+                batch = _cat_batches(batch, _take_groups(more, k, G), tokenizer.pad_token_id)
+                rewards = torch.cat([rewards, r.view(-1, G)[k].flatten()])
+                prompts += [p for p, kk in zip(ps, k) if kk]
+                answers += [a for a, kk in zip(ans, k) if kk]
+                prompt_ids += [i for i, kk in zip(ids, k) if kk]
+        if not prompts:                                 # nothing to learn from: no update this step
+            return {"reward": float("nan"), "rollouts": sampled, "groups_kept": 0, "groups_dropped": dropped,
+                    "refills": refills, "skipped": True}
     completion_ids, cmask = batch["completion_ids"], batch["completion_mask"]
     device = completion_ids.device
-
-    # 2. Score them. Decode only the counted tokens; each completion is paired with the answer of
-    #    its own prompt (answers repeated G times in a row, matching the row layout).
-    texts = [tokenizer.decode(ids[: int(m.sum())], skip_special_tokens=True)
-             for ids, m in zip(completion_ids, cmask)]
-    completion_answers = [a for a in answers for _ in range(G)]
-    rewards = torch.as_tensor(reward_fn(texts, completion_answers), dtype=torch.float32)
-    if st.truncated_is_wrong and "truncated" in batch:
-        rewards = torch.where(batch["truncated"].cpu(), torch.zeros_like(rewards), rewards)
 
     input_ids = torch.cat([batch["prompt_ids"], completion_ids], dim=1)
     attention_mask = torch.cat([batch["prompt_mask"], cmask], dim=1)
@@ -103,9 +147,8 @@ def grpo_step(model, optimizer, tokenizer, prompts: list[str], answers: list[str
     if advantage is None:
         advantages, keep = group_advantages(rewards, G, st.scale), None
     else:
-        ids = list(range(len(prompts))) if prompt_ids is None else list(prompt_ids)
         adv_batch = AdvantageBatch(
-            rewards=rewards, group_size=G, prompt_ids=torch.as_tensor(ids, dtype=torch.long),
+            rewards=rewards, group_size=G, prompt_ids=torch.as_tensor(prompt_ids, dtype=torch.long),
             lengths=cmask.sum(dim=1).cpu(), step=step,
             seq_logps=(old_logps * cmask).sum(dim=1).cpu() if needs_logps else None,
         )
@@ -118,6 +161,8 @@ def grpo_step(model, optimizer, tokenizer, prompts: list[str], answers: list[str
     # 5. Several updates on the same batch. Each micro-batch's loss is weighted so that the summed
     #    gradient equals the gradient of the full batch's loss.
     total_tokens = loss_mask.sum().clamp(min=1).item()
+    in_loss = loss_mask.sum(dim=1) > 0                    # completions in the loss (a keep-mask drops some)
+    total_rows = max(int(in_loss.sum().item()), 1)
     for _ in range(st.num_updates):
         optimizer.zero_grad()
         loss_value, logps_parts, ent_parts = 0.0, [], []
@@ -131,7 +176,7 @@ def grpo_step(model, optimizer, tokenizer, prompts: list[str], answers: list[str
                 if st.loss_type in ("bnpo", "dapo"):     # a mean over the batch's tokens
                     loss = loss * (loss_mask[s].sum().item() / total_tokens)
                 else:                                     # a mean over the batch's completions
-                    loss = loss * ((s.stop - s.start) / N)
+                    loss = loss * (int(in_loss[s].sum().item()) / total_rows)
             loss.backward()
             loss_value += loss.item()
             logps_parts.append(logps.detach())
@@ -165,7 +210,9 @@ def grpo_step(model, optimizer, tokenizer, prompts: list[str], answers: list[str
     stats = {"reward": rewards.mean().item(), "clip_frac": clip_frac, "kl": kl, "loss": loss_value,
              "completion_length": m.sum(dim=1).mean().item(), "zero_adv_frac": zero_adv_frac,
              "reward_var": reward_var, "uniform_frac": uniform_frac, "adv_abs_mean": adv_abs_mean,
-             "entropy": entropy, "grad_norm": grad_norm, "rollouts": N}
+             "entropy": entropy, "grad_norm": grad_norm, "rollouts": sampled}
+    if st.drop_uniform_groups:
+        stats.update(groups_kept=len(prompts), groups_dropped=dropped, refills=refills)
     if "truncated" in batch:   # completions cut off before their answer could be scored
         stats["truncated_frac"] = batch["truncated"].float().mean().item()
     return stats
@@ -174,3 +221,37 @@ def grpo_step(model, optimizer, tokenizer, prompts: list[str], answers: list[str
 def _grad_norm(model) -> float:
     grads = [p.grad.detach().float().norm() for p in model.parameters() if p.grad is not None]
     return torch.stack(grads).norm().item() if grads else 0.0
+
+
+def _mixed_groups(rewards: torch.Tensor, group_size: int) -> torch.Tensor:
+    """[num_groups] bool: True for a group whose rewards are not all equal (DAPO keeps only these)."""
+    r = rewards.view(-1, group_size)
+    return ~(r == r[:, :1]).all(dim=1)
+
+
+def _take_groups(batch: dict, keep: torch.Tensor, group_size: int) -> dict:
+    """The rows of the kept groups, in order."""
+    rows = keep.to(torch.bool).repeat_interleave(group_size)
+    return {k: v[rows.to(v.device)] for k, v in batch.items()}
+
+
+def _cat_batches(a: dict, b: dict, pad_id: int) -> dict:
+    """Stack two sampled batches whose prompt and completion widths may differ: prompts are padded on
+    the left, completions on the right, with pad tokens the masks mark as not counted."""
+    def pad(x, width, left, value):
+        extra = width - x.size(1)
+        if extra == 0:
+            return x
+        fill = torch.full((x.size(0), extra), value, dtype=x.dtype, device=x.device)
+        return torch.cat([fill, x] if left else [x, fill], dim=1)
+
+    out = {}
+    p = max(a["prompt_ids"].size(1), b["prompt_ids"].size(1))
+    c = max(a["completion_ids"].size(1), b["completion_ids"].size(1))
+    for key, width, left, value in (("prompt_ids", p, True, pad_id), ("prompt_mask", p, True, 0),
+                                    ("completion_ids", c, False, pad_id), ("completion_mask", c, False, 0)):
+        out[key] = torch.cat([pad(a[key], width, left, value), pad(b[key], width, left, value)])
+    for key in a:
+        if key not in out:                                       # per-row flags such as "truncated"
+            out[key] = torch.cat([a[key], b[key]])
+    return out

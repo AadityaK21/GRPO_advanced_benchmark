@@ -34,9 +34,14 @@ pytest                                                           # all tests, CP
 python scripts/run.py --method vanilla --seed 0 --smoke          # whole pipeline in a few minutes
 python scripts/run.py --method vanilla --seed 0                  # one benchmark run
 python scripts/run.py --method dr_grpo --seed 0 --set budget.group_size=4
+python scripts/run.py --method two_grpo --seed 0 --set budget.group_size=2   # 2-GRPO runs only at G = 2
 python scripts/run.py --eval-only --seed 0                       # the untrained base model
 python scripts/aggregate.py                                      # IQM table and the falsification test
 ```
+
+Tier 1 methods (`--method`): `vanilla`, `dr_grpo`, `dapo`, `rloo`, `sign`, `ngrpo`, `softmax_grpo`, `corpo`,
+`mc_grpo`, `two_grpo`. Their free parameters (`softmax_grpo` tau, `corpo` c) are tuned with
+`--set advantage.params.tau=0.3` and the like, inside the equal tuning budget.
 
 Each run writes `results/<method>/g<group size>/seed<seed>-<time>/`: the full config, the seed, the git
 commit, a line per training step, every validation check, and `summary.json` with the test accuracy.
@@ -45,7 +50,7 @@ Commit before a benchmark run: a run from a tree with uncommitted changes is fla
 ## Layout
 
 - `configs/base.yaml`: everything every condition shares. `configs/methods/<name>.yaml`: one per method,
-  only its `advantage` and `loss` sections (enforced).
+  only its `advantage`, `loss` and `filter` sections (enforced). `filter` is DAPO's dynamic sampling.
 - `src/advantages/`: one file per method, all with the same signature (see `base.py`).
 - `src/train/`: the GRPO loop. Nothing method-specific. `logprobs.py` scores the output layer in chunks.
 - `src/reward/`: the GSM8K answer parser and exact-match reward.

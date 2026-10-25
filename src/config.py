@@ -3,7 +3,7 @@
     cfg = load_config("dr_grpo", ["budget.group_size=4", "optimizer.lr=3e-6"])
 
 Rules, so that conditions stay matched:
-- A method file may set only its `advantage` and `loss` sections. Anything else it needs to change
+- A method file may set only its `advantage`, `loss` and `filter` sections (filter: DAPO's dynamic sampling). Anything else it needs to change
   is a deviation from the shared setup: it goes in the paper, and here as an explicit override.
 - Every key must already exist in base.yaml, except under advantage.params. A typo is an error,
   not a silently ignored setting.
@@ -18,7 +18,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = ROOT / "configs"
-METHOD_SECTIONS = {"advantage", "loss"}
+METHOD_SECTIONS = {"advantage", "loss", "filter"}
 
 
 def load_config(method: str, overrides: list[str] | tuple = (), config_dir: Path | str = CONFIG_DIR) -> dict:

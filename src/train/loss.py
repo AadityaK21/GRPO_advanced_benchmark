@@ -21,7 +21,11 @@ def grpo_loss(logps: torch.Tensor, old_logps: torch.Tensor | None, advantages: t
     Then average over the counted tokens, according to loss_type:
         "grpo":          mean over each completion's tokens, then mean over completions
         "bnpo", "dapo":  sum over all tokens / number of tokens
-        "dr_grpo":       sum over all tokens / (B * max_completion_length)
+        "dr_grpo":       sum over all tokens / (completions * max_completion_length)
+    "Completions" are the rows with at least one counted token. A row whose mask is all 0 is not in
+    the loss at all, not even in a denominator: that is how a method drops a completion (MC-GRPO's
+    keep-mask). Every sampled completion has at least one counted token (its EOS or its last token),
+    so without a keep-mask this is all B rows, exactly as TRL.
     (TRL's "dapo" divides by the token count of the whole generation batch. With one batch and
     no gradient accumulation, that is the same as "bnpo".)
 
@@ -47,12 +51,15 @@ def grpo_loss(logps: torch.Tensor, old_logps: torch.Tensor | None, advantages: t
         d = ref_logps.detach() - logps
         per_token = per_token + beta * (torch.exp(d) - d - 1)
 
+    # Completions in the loss: rows with at least one counted token (all rows unless a keep-mask dropped some).
+    n_rows = (mask.sum(dim=1) > 0).sum().clamp(min=1).to(logps.dtype)
+
     # The token averaging: the one place GRPO, DAPO and Dr. GRPO differ in the loss.
     if loss_type == "grpo":
         # Mean over each completion's own tokens, then over completions: tokens of short
         # completions weigh more. This is the length bias Dr. GRPO points out.
         per_completion = (per_token * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1.0)
-        return per_completion.mean()
+        return per_completion.sum() / n_rows
     if loss_type in ("bnpo", "dapo"):
         # Every counted token weighs the same.
         return (per_token * mask).sum() / mask.sum().clamp(min=1.0)
@@ -60,4 +67,4 @@ def grpo_loss(logps: torch.Tensor, old_logps: torch.Tensor | None, advantages: t
     # how long this batch's answers happen to be.
     if max_completion_length is None:
         raise ValueError("loss_type='dr_grpo' needs max_completion_length")
-    return (per_token * mask).sum() / (per_token.size(0) * max_completion_length)
+    return (per_token * mask).sum() / (n_rows * max_completion_length)

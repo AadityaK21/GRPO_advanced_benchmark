@@ -5,6 +5,8 @@ import pytest
 import torch
 
 import src.train.loop
+import src.advantages.base
+import src.advantages.grpo
 import src.train.sample
 from src.advantages.grpo import group_advantages
 from src.train.logprobs import per_token_logps
@@ -334,3 +336,129 @@ def test_uniform_groups_and_advantage_scale(monkeypatch):
 def _has_sign():
     import importlib.util
     return importlib.util.find_spec("src.advantages.sign") is not None
+
+
+def test_mc_grpo_through_the_step(monkeypatch):
+    """MC-GRPO end to end: G + 1 sampled, the median completion of each group dropped, and the update
+    the same as a batch that never had those rows."""
+    seen = {}
+    _fixed(monkeypatch, seen)
+    method = build_advantage("mc_grpo")
+    # FIXED_BATCH has 2 prompts x 4 rows, so group size 3 plus the 1 extra rollout.
+    # FIXED_REWARDS: group 1 [1, 0, 0, 1] -> median (lower middle) 0, row 1 dropped;
+    #                group 2 [0, 1, 1, 1] -> median 1, row 5 dropped.
+    s = GRPOSettings(group_size=3, max_new_tokens=8, loss_type="grpo")
+    model = make_model(logit_scale=5.0)
+    before = copy.deepcopy(model.state_dict())
+    stats = grpo_step(model, torch.optim.SGD(model.parameters(), lr=1.0), make_tokenizer(), ["p0", "p1"],
+                      ["a0", "a1"], lambda t, a: FIXED_REWARDS, s, advantage=method)
+    assert seen["group_size"] == 4 and stats["rollouts"] == 8
+    got = {n: before[n] - v for n, v in model.state_dict().items()}
+    adv, keep = method(src.advantages.base.AdvantageBatch(
+        rewards=torch.tensor(FIXED_REWARDS), group_size=4, prompt_ids=torch.arange(2),
+        lengths=FIXED_BATCH["completion_mask"].sum(dim=1)))
+    assert keep.tolist() == [True, False, True, True, True, False, True, True]
+    mask = FIXED_BATCH["completion_mask"].clone() * keep.unsqueeze(1)
+    monkeypatch.setitem(FIXED_BATCH, "completion_mask", mask)
+    fixed_adv = Advantage(name="fixed", fn=lambda b, st: adv)
+    want, _ = _update(monkeypatch, GRPOSettings(group_size=4, max_new_tokens=8, loss_type="grpo"), advantage=fixed_adv)
+    for name in want:
+        torch.testing.assert_close(got[name], want[name])
+
+
+# ---- DAPO's dynamic sampling --------------------------------------------------------------------
+
+REFILL_BATCH = {   # one prompt x 4, narrower than FIXED_BATCH on both sides, to test the padding
+    "prompt_ids": torch.tensor([[17, 18]] * 4),
+    "prompt_mask": torch.tensor([[1, 1]] * 4),
+    "completion_ids": torch.tensor([[42, EOS, PAD], [43, 44, 45], [46, 47, EOS], [EOS, PAD, PAD]]),
+    "completion_mask": torch.tensor([[1, 1, 0], [1, 1, 1], [1, 1, 1], [1, 0, 0]]),
+}
+
+
+def _by_answer(texts, answers):
+    """'u' answers: every completion right (a uniform group). Others: right, wrong, right, wrong."""
+    return [1.0 if a == "u" else float(i % 2 == 0) for i, a in enumerate(answers)]
+
+
+def _dynamic(monkeypatch, settings, answers, refill_answer="m", max_rollouts=None, lr=1.0):
+    calls = []
+
+    def sampler(model, tokenizer, prompts, group_size, max_new_tokens, temperature):
+        calls.append(list(prompts))
+        n = len(prompts) * group_size
+        if len(calls) == 1:
+            return {k: v[:n].clone() for k, v in FIXED_BATCH.items()}
+        return {k: v.repeat(len(prompts), 1)[:n].clone() for k, v in REFILL_BATCH.items()}   # REFILL_BATCH per prompt
+
+    monkeypatch.setattr(src.train.loop, "sample_group", sampler)
+    seen = {}
+
+    def spy(batch, state):
+        seen["batch"] = batch
+        return src.advantages.grpo.group_advantages(batch.rewards, batch.group_size)
+
+    refills = iter(range(100, 200))
+
+    def refill(n):
+        return [f"r{k}" for k in range(n)], [refill_answer] * n, [next(refills) for _ in range(n)]
+
+    model = make_model(logit_scale=5.0)
+    stats = grpo_step(model, torch.optim.SGD(model.parameters(), lr=lr), make_tokenizer(), ["p0", "p1"], answers,
+                      _by_answer, settings, advantage=Advantage(name="spy", fn=spy), prompt_ids=[7, 8],
+                      refill=refill, max_rollouts=max_rollouts)
+    return stats, seen.get("batch"), calls
+
+
+def test_dynamic_sampling_replaces_uniform_groups_and_counts_every_rollout(monkeypatch):
+    s = GRPOSettings(group_size=4, max_new_tokens=8, drop_uniform_groups=True)
+    stats, batch, calls = _dynamic(monkeypatch, s, answers=["m", "u"])
+    assert calls == [["p0", "p1"], ["r0"]], "prompt p1's group was all right, so one fresh prompt is sampled"
+    assert stats["rollouts"] == 12, "8 + 4: the dropped group's rollouts still count"
+    assert (stats["groups_kept"], stats["groups_dropped"], stats["refills"]) == (2, 1, 1)
+    assert batch.prompt_ids.tolist() == [7, 100] and batch.rewards.tolist() == [1, 0, 1, 0] * 2
+
+
+def test_dynamic_sampling_stops_at_the_rollout_budget(monkeypatch):
+    s = GRPOSettings(group_size=4, max_new_tokens=8, drop_uniform_groups=True)
+    stats, batch, calls = _dynamic(monkeypatch, s, answers=["m", "u"], max_rollouts=8)
+    assert len(calls) == 1 and stats["rollouts"] == 8 and stats["groups_kept"] == 1
+    assert batch.prompt_ids.tolist() == [7], "the step trains on the one mixed group it has"
+
+
+def test_dynamic_sampling_gives_up_after_max_refills(monkeypatch):
+    s = GRPOSettings(group_size=4, max_new_tokens=8, drop_uniform_groups=True, max_refills=3)
+    stats, batch, calls = _dynamic(monkeypatch, s, answers=["u", "u"], refill_answer="u")
+    assert stats.get("skipped") and batch is None and len(calls) == 4
+    assert stats["rollouts"] == 8 + 3 * 2 * 4, "each refill asks for the 2 missing groups"
+
+
+def test_without_dynamic_sampling_uniform_groups_stay(monkeypatch):
+    stats, batch, calls = _dynamic(monkeypatch, GRPOSettings(group_size=4, max_new_tokens=8), answers=["m", "u"])
+    assert len(calls) == 1 and stats["rollouts"] == 8 and "groups_kept" not in stats
+    assert batch.prompt_ids.tolist() == [7, 8]
+
+
+def test_batches_of_different_widths_are_padded_on_the_right_sides():
+    a = {k: v[:4] for k, v in FIXED_BATCH.items()}
+    a["truncated"] = torch.tensor([False, True, False, True])
+    b = dict(REFILL_BATCH, truncated=torch.tensor([False, False, False, False]))
+    out = src.train.loop._cat_batches(a, b, PAD)
+    assert out["prompt_ids"].shape == (8, 3) and out["completion_ids"].shape == (8, 4)
+    assert out["prompt_ids"][4].tolist() == [PAD, 17, 18] and out["prompt_mask"][4].tolist() == [0, 1, 1]
+    assert out["completion_ids"][5].tolist() == [43, 44, 45, PAD] and out["completion_mask"][5].tolist() == [1, 1, 1, 0]
+    assert out["truncated"].tolist() == [False, True, False, True, False, False, False, False]
+    torch.testing.assert_close(out["completion_mask"][:4], a["completion_mask"])
+
+
+def test_padding_a_refill_does_not_change_its_log_probs():
+    """Left-padding a prompt and right-padding a completion must leave the counted log-probs unchanged."""
+    model = make_model(logit_scale=5.0)
+    out = src.train.loop._cat_batches({k: v[:4] for k, v in FIXED_BATCH.items()}, REFILL_BATCH, PAD)
+    ids = torch.cat([out["prompt_ids"], out["completion_ids"]], dim=1)[4:]
+    am = torch.cat([out["prompt_mask"], out["completion_mask"]], dim=1)[4:]
+    padded = per_token_logps(model, ids, am, 4, 1.0)[:, :3] * REFILL_BATCH["completion_mask"]
+    ids0 = torch.cat([REFILL_BATCH["prompt_ids"], REFILL_BATCH["completion_ids"]], dim=1)
+    am0 = torch.cat([REFILL_BATCH["prompt_mask"], REFILL_BATCH["completion_mask"]], dim=1)
+    plain = per_token_logps(model, ids0, am0, 3, 1.0) * REFILL_BATCH["completion_mask"]
+    torch.testing.assert_close(padded, plain, rtol=1e-5, atol=1e-5)

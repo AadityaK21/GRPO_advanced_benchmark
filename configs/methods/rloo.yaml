@@ -1,0 +1,5 @@
+# 3. RLOO (arXiv 2402.14740, section 2.3). Leave-one-out baseline, REINFORCE's sequence-sum loss.
+advantage:
+  name: rloo
+loss:
+  loss_type: dr_grpo           # sum of token terms / a constant: RLOO's unnormalised sequence log-prob

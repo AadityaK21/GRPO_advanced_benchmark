@@ -1,0 +1,9 @@
+# 5. NGRPO (arXiv 2509.18851, sections 4.1-4.2). A virtual reward-1 sample in every group; asymmetric clip.
+advantage:
+  name: ngrpo
+  params:
+    r_max: 1.0
+    eps: 1.0e-6
+loss:
+  eps_low: 0.16                # eps_neg in the paper
+  eps_high: 0.24               # eps_pos in the paper

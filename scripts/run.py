@@ -69,6 +69,9 @@ def main(argv=None) -> Path:
     cfg = load_config(args.method, list(args.set) + (SMOKE if args.smoke else []))
     if args.eval_only:
         cfg["method"] = "base"      # the untrained model: same prompt, same evaluation, its own folder
+    # Build the method first, so a bad method or group size fails before any download or model load.
+    advantage = build_advantage(cfg["advantage"]["name"], cfg["advantage"].get("params"))
+    advantage.check_group_size(cfg["budget"]["group_size"])
     seed = args.seed
     random.seed(seed)
     torch.manual_seed(seed)        # LoRA initialisation and the sampling stream
@@ -99,11 +102,14 @@ def main(argv=None) -> Path:
     test_prompts, test_answers = prompts_for(test), [r["answer"] for r in test]
 
     # ---- budget ---------------------------------------------------------------------------------
-    advantage = build_advantage(cfg["advantage"]["name"], cfg["advantage"].get("params"))
     b = cfg["budget"]
     per_prompt = b["group_size"] + advantage.extra_rollouts
     prompts_per_step = max(1, b["rollouts_per_step"] // per_prompt)
     rollouts_per_step = prompts_per_step * per_prompt
+    dynamic = bool(cfg["filter"]["drop_uniform_groups"])
+    # Without dynamic sampling every step costs exactly rollouts_per_step. With it (DAPO) a step costs
+    # that plus every refill, so the run goes until the rollout budget is spent: `steps` is then only
+    # the most it could take.
     steps = 0 if args.eval_only else b["total_rollouts"] // rollouts_per_step
 
     run_dir = new_run_dir(cfg, seed)
@@ -115,8 +121,9 @@ def main(argv=None) -> Path:
         "val_ids_sha1": hashlib.sha1(",".join(str(r["idx"]) for r in splits["val"]).encode()).hexdigest(),
         "example_prompt": val_prompts[0] if val_prompts else None,
     })
-    print(f"run dir {run_dir}\n{steps} steps x {prompts_per_step} prompts x {per_prompt} completions "
-          f"= {steps * rollouts_per_step} rollouts on {device}", flush=True)
+    print(f"run dir {run_dir}\n{'at most ' if dynamic else ''}{steps} steps x {prompts_per_step} prompts x "
+          f"{per_prompt} completions = {steps * rollouts_per_step} rollouts on {device}"
+          + (" (dynamic sampling: refills count against the budget)" if dynamic else ""), flush=True)
 
     ec = cfg["eval"]
     ckpt_dir = run_dir / "ckpt"
@@ -151,41 +158,68 @@ def main(argv=None) -> Path:
                                       weight_decay=o["weight_decay"])
         if o["schedule"] != "linear":
             raise ValueError(f"optimizer.schedule {o['schedule']!r} is not implemented")
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda s: max(0.0, 1.0 - s / steps))
+        budget = b["total_rollouts"]
+        # Linear decay to 0 over the run: by step for a fixed cost per step, by rollouts spent otherwise.
+        progress = (lambda s: rollouts / budget) if dynamic else (lambda s: s / steps)
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda s: max(0.0, 1.0 - progress(s)))
         L = cfg["loss"]
         settings = GRPOSettings(
             group_size=b["group_size"], max_new_tokens=cfg["sampling"]["max_new_tokens"],
             temperature=cfg["sampling"]["temperature"], num_updates=L["num_updates"], loss_type=L["loss_type"],
             eps_low=L["eps_low"], eps_high=L["eps_high"], beta=L["beta"], max_grad_norm=o["max_grad_norm"],
             micro_batch_size=b["micro_batch_size"], truncated_is_wrong=cfg["reward"]["truncated_is_wrong"],
+            drop_uniform_groups=dynamic, max_refills=cfg["filter"]["max_refills"],
         )
         train_log = JsonlWriter(run_dir / "train.jsonl")
         cursor, step_times = 0, []
-        for step in range(steps):
-            rows = [train_pool[(cursor + i) % len(train_pool)] for i in range(prompts_per_step)]
-            cursor += prompts_per_step
+
+        def next_rows(n):
+            nonlocal cursor
+            rows = [train_pool[(cursor + i) % len(train_pool)] for i in range(n)]
+            cursor += n
+            return rows
+
+        def refill(n):
+            rows = next_rows(n)
+            return prompts_for(rows), [r["answer"] for r in rows], [r["idx"] for r in rows]
+
+        step, last_checked = 0, 0
+        while step < steps and rollouts + rollouts_per_step <= b["total_rollouts"]:
+            rows = next_rows(prompts_per_step)
             lr = scheduler.get_last_lr()[0]
             t0 = time.perf_counter()
             stats = grpo_step(model, optimizer, tokenizer, prompts_for(rows), [r["answer"] for r in rows],
                               exact_match_reward, settings, ref_model, advantage=advantage,
-                              prompt_ids=[r["idx"] for r in rows], step=step)
-            scheduler.step()
+                              prompt_ids=[r["idx"] for r in rows], step=step,
+                              refill=refill if dynamic else None,
+                              max_rollouts=b["total_rollouts"] - rollouts)
             rollouts += stats["rollouts"]
+            scheduler.step()
             step_times.append(time.perf_counter() - t0)
             stats.update(step=step + 1, rollouts_total=rollouts, lr=lr, seconds=round(step_times[-1], 2))
             if device == "cuda":
                 stats["gpu_peak_gb"] = round(torch.cuda.max_memory_allocated() / 2**30, 2)
             train_log.write(stats)
-            eta = sum(step_times) / len(step_times) * (steps - step - 1) / 60
-            print(f"step {step + 1:4d}/{steps}  reward {stats['reward']:.3f}  uniform {stats['uniform_frac']:.2f}  "
+            step += 1
+            if stats.get("skipped"):
+                print(f"step {step:4d}  every group had equal rewards after {stats['refills']} refills: "
+                      f"no update  ({rollouts} rollouts spent)", flush=True)
+                continue
+            left = (b["total_rollouts"] - rollouts) / max(rollouts / step, 1) if dynamic else steps - step
+            eta = sum(step_times) / len(step_times) * left / 60
+            print(f"step {step:4d}/{steps}  reward {stats['reward']:.3f}  uniform {stats['uniform_frac']:.2f}  "
                   f"zero-adv {stats['zero_adv_frac']:.2f}  "
                   f"len {stats['completion_length']:5.0f}  ent {stats['entropy']:.3f}  "
                   f"gnorm {stats['grad_norm']:.3f}  {stats['seconds']:.1f}s  ~{eta:.0f} min left"
+                  + (f"  kept {stats['groups_kept']}, dropped {stats['groups_dropped']}" if dynamic else "")
                   + (f"  peak {stats['gpu_peak_gb']:.1f} GB" if "gpu_peak_gb" in stats else ""), flush=True)
             if not all(map(_finite, (stats["loss"], stats["grad_norm"]))):
-                raise FloatingPointError(f"non-finite loss or gradient at step {step + 1}; see {run_dir}")
-            if (step + 1) % ec["every"] == 0 or step + 1 == steps:
-                last_val = check_val(step + 1)
+                raise FloatingPointError(f"non-finite loss or gradient at step {step}; see {run_dir}")
+            if step % ec["every"] == 0:
+                last_val, last_checked = check_val(step), step
+        if last_checked != step:              # always validate the final weights
+            last_val = check_val(step)
+        steps = step                          # the steps actually taken
         train_log.close()
     train_seconds = time.perf_counter() - t_start - eval_seconds
 

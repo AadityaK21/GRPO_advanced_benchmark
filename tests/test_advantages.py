@@ -65,8 +65,9 @@ def test_every_method_file_follows_the_interface():
     for name in names:
         cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "configs" / "methods" / f"{name}.yaml").read_text())
         method = build_advantage(cfg["advantage"]["name"], cfg["advantage"].get("params"))
-        adv, keep = method(_batch([1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0], group_size=4))
-        assert adv.shape == (8,) and adv.dtype == torch.float32 and torch.isfinite(adv).all(), name
+        g = (method.group_size or 4) + method.extra_rollouts
+        adv, keep = method(_batch([1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0][: 2 * g], group_size=g))
+        assert adv.shape == (2 * g,) and adv.dtype == torch.float32 and torch.isfinite(adv).all(), name
 
 
 def test_vanilla_is_the_reference_group_advantage():
@@ -112,3 +113,155 @@ def test_bad_methods_are_caught():
         Advantage(name="nan", fn=lambda b, s: b.rewards / 0 * 0)(_batch([1.0, 0.0], 2))
     with pytest.raises(ValueError, match="divisible"):
         _batch([1.0, 0.0, 1.0], 2)
+
+
+# ---- Tier 1 methods: the hand-worked examples in docs/method-specs.md, checked to 4 decimals ---------
+
+def _adv(name, rewards, group_size, **params):
+    return build_advantage(name, params)(_batch(rewards, group_size))
+
+
+def _close(got, want):
+    torch.testing.assert_close(got, torch.tensor(want, dtype=torch.float32), rtol=0, atol=1e-4)
+
+
+# The three groups every spec entry works through (group size 4): one right, three right, none right.
+ONE, THREE, NONE = [1.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 0.0], [0.0, 0.0, 0.0, 0.0]
+
+
+def test_vanilla_spec_example():
+    adv, _ = _adv("vanilla", ONE + THREE + NONE, 4)
+    _close(adv, [1.4997, -0.4999, -0.4999, -0.4999, 0.4999, 0.4999, 0.4999, -1.4997, 0, 0, 0, 0])
+
+
+def test_rloo_is_leave_one_out():
+    # 2402.14740 sec. 2.3: A_i = r_i - mean of the other G - 1 rewards.
+    adv, keep = _adv("rloo", ONE + THREE + NONE, 4)
+    _close(adv, [1, -1 / 3, -1 / 3, -1 / 3, 1 / 3, 1 / 3, 1 / 3, -1, 0, 0, 0, 0])
+    assert keep is None
+    # ... which is G / (G - 1) times Dr. GRPO's advantage, for any rewards (method-specs.md, finding 1).
+    r = torch.rand(5 * 6, generator=torch.Generator().manual_seed(1)).tolist()
+    rloo, _ = _adv("rloo", r, 6)
+    dr, _ = _adv("dr_grpo", r, 6)
+    torch.testing.assert_close(rloo, dr * 6 / 5)
+
+
+def test_sign_ignores_the_group():
+    # 2605.07689 eq. 5: A = 2r - 1. All-wrong groups still get -1: that is the point of the method.
+    adv, _ = _adv("sign", ONE + THREE + NONE, 4)
+    _close(adv, [1, -1, -1, -1, 1, 1, 1, -1, -1, -1, -1, -1])
+    with pytest.raises(ValueError, match=r"\[0, 1\]"):
+        _adv("sign", [2.0, 0.0], 2)
+
+
+def test_ngrpo_adds_a_virtual_correct_sample():
+    # 2509.18851 eqs. 5-6, with the official code's std (n - 1 over G + 1 values) and eps 1e-6.
+    adv, _ = _adv("ngrpo", ONE + THREE + NONE, 4)
+    _close(adv, [1.0954, -0.7303, -0.7303, -0.7303, 0.4472, 0.4472, 0.4472, -1.7889,
+                 -0.4472, -0.4472, -0.4472, -0.4472])
+    # The virtual sample takes no gradient, so each group's advantages sum to a negative number.
+    assert (adv.view(3, 4).sum(dim=1) < 0).all()
+    # An all-correct group: 5 equal values, std 0, so A = 0 (no NaN).
+    adv, _ = _adv("ngrpo", [1.0] * 4, 4)
+    assert torch.all(adv == 0)
+
+
+@pytest.mark.parametrize("tau, want", [
+    (0.1, [2.9995, -0.9998, -0.9998, -0.9998, 0.3333, 0.3333, 0.3333, -0.9999, 0, 0, 0, 0]),
+    (0.3, [2.6133, -0.8711, -0.8711, -0.8711, 0.3177, 0.3177, 0.3177, -0.9530, 0, 0, 0, 0]),
+])
+def test_softmax_grpo(tau, want):
+    # 2608.09271 eq. 1: A = G softmax(r / tau) - 1. Sums to 0 per group, bounded in (-1, G - 1).
+    adv, _ = _adv("softmax_grpo", ONE + THREE + NONE, 4, tau=tau)
+    _close(adv, want)
+    torch.testing.assert_close(adv.view(3, 4).sum(dim=1), torch.zeros(3), atol=1e-5, rtol=0)
+
+
+def test_softmax_grpo_does_not_overflow_at_a_tiny_tau():
+    adv, _ = _adv("softmax_grpo", [1.0, 0.0, 0.0, 0.0], 4, tau=1e-4)
+    _close(adv, [3, -1, -1, -1])
+
+
+def test_corpo_threshold():
+    # 2511.04439 eqs. 11-12 with c = 0.5: A = r - max(c, mean).
+    adv, _ = _adv("corpo", ONE + THREE + NONE, 4, c=0.5)
+    _close(adv, [0.5, -0.5, -0.5, -0.5, 0.25, 0.25, 0.25, -0.75, -0.5, -0.5, -0.5, -0.5])
+    # With the paper's own threshold, c = 0, it is exactly Dr. GRPO's advantage on 0/1 rewards.
+    r = (torch.rand(40, generator=torch.Generator().manual_seed(2)) > 0.5).float().tolist()
+    torch.testing.assert_close(_adv("corpo", r, 8, c=0.0)[0], _adv("dr_grpo", r, 8)[0])
+
+
+def test_mc_grpo_median_and_mad():
+    # 2601.22582 eqs. 2-6 on G + 1 = 5 rewards, eps 1e-3. With 0/1 rewards MAD is 0, so the minority
+    # completions get +-1000 and the majority 0; one median completion is dropped from the loss.
+    adv, keep = _adv("mc_grpo", [1.0, 0.0, 0.0, 0.0, 1.0] + [1.0, 1.0, 1.0, 0.0, 0.0] + [0.0] * 5, 5)
+    _close(adv, [1000, 0, 0, 0, 1000] + [0, 0, 0, -1000, -1000] + [0] * 5)
+    assert keep.tolist() == [True, False, True, True, True] + [False, True, True, True, True] + [False] + [True] * 4
+    assert (keep.view(3, 5).sum(dim=1) == 4).all(), "G = 4 completions per prompt enter the loss"
+
+
+def test_mc_grpo_with_a_graded_reward():
+    # Their GSM8K reward was 2 / 1.5 / 0, where MAD is not 0. Rewards [2, 1.5, 0, 2, 0]: median 1.5,
+    # |r - 1.5| = [0.5, 0, 1.5, 0.5, 1.5], MAD 0.5. The 1.5 completion (the median) is dropped.
+    adv, keep = _adv("mc_grpo", [2.0, 1.5, 0.0, 2.0, 0.0], 5)
+    _close(adv, [0.5 / 0.501, 0, -1.5 / 0.501, 0.5 / 0.501, -1.5 / 0.501])
+    assert keep.tolist() == [True, False, True, True, True]
+
+
+def test_mc_grpo_asks_for_one_extra_rollout():
+    assert build_advantage("mc_grpo").extra_rollouts == 1
+    assert build_advantage("vanilla").extra_rollouts == 0
+
+
+def test_two_grpo_is_vanilla_at_group_size_2_only():
+    adv, _ = _adv("two_grpo", [1.0, 0.0, 1.0, 1.0, 0.0, 0.0], 2)
+    _close(adv, [0.7070, -0.7070, 0, 0, 0, 0])
+    method = build_advantage("two_grpo")
+    method.check_group_size(2)
+    with pytest.raises(ValueError, match="budget.group_size=2"):
+        method.check_group_size(8)
+    build_advantage("vanilla").check_group_size(8)     # other methods take any group size
+
+
+def test_every_method_config_loads_with_its_own_settings():
+    from src.config import load_config
+    cfg = load_config("ngrpo")
+    assert (cfg["loss"]["eps_low"], cfg["loss"]["eps_high"]) == (0.16, 0.24)
+    assert load_config("rloo")["loss"]["loss_type"] == "dr_grpo"
+    assert load_config("corpo")["advantage"]["params"]["c"] == 0.5
+    assert load_config("softmax_grpo", ["advantage.params.tau=0.3"])["advantage"]["params"]["tau"] == 0.3
+    for name in ("sign", "softmax_grpo", "corpo", "mc_grpo", "two_grpo"):
+        # Methods whose papers change nothing around the advantage inherit the base loss untouched.
+        assert load_config(name)["loss"] == load_config("vanilla")["loss"], name
+
+
+def test_dapo_overlong_penalty():
+    # DAPO eq. 13 at L_max 512, L_cache 102: free up to 410 tokens, then linear down to -1 at 512.
+    from src.advantages.dapo import overlong_penalty
+    got = overlong_penalty(torch.tensor([10, 410, 411, 461, 512]), l_max=512, l_cache=102)
+    _close(got, [0, 0, -1 / 102, -51 / 102, -1])
+    with pytest.raises(ValueError):
+        overlong_penalty(torch.tensor([1]), l_max=100, l_cache=100)
+
+
+def test_dapo_is_vanilla_on_the_shaped_reward():
+    rewards = [1.0, 0.0, 1.0, 0.0]
+    lengths = torch.tensor([100, 100, 512, 461])
+    batch = AdvantageBatch(rewards=torch.tensor(rewards), group_size=4, prompt_ids=torch.arange(1), lengths=lengths)
+    adv, keep = build_advantage("dapo", {"l_max": 512, "l_cache": 102, "overlong_scale": 0.5})(batch)
+    shaped = [1.0, 0.0, 1.0 - 0.5, 0.0 - 0.5 * 51 / 102]
+    torch.testing.assert_close(adv, group_advantages(shaped, 4))
+    assert keep is None
+    # Short answers: no shaping, exactly vanilla.
+    short = AdvantageBatch(rewards=torch.tensor(rewards), group_size=4, prompt_ids=torch.arange(1),
+                           lengths=torch.full((4,), 50))
+    torch.testing.assert_close(build_advantage("dapo")(short)[0], group_advantages(rewards, 4))
+
+
+def test_dapo_config():
+    from src.config import load_config
+    cfg = load_config("dapo")
+    assert cfg["loss"]["loss_type"] == "dapo" and (cfg["loss"]["eps_low"], cfg["loss"]["eps_high"]) == (0.2, 0.28)
+    assert cfg["filter"]["drop_uniform_groups"] is True
+    assert cfg["advantage"]["params"]["l_max"] == cfg["sampling"]["max_new_tokens"]
+    assert load_config("vanilla")["filter"]["drop_uniform_groups"] is False

@@ -9,6 +9,8 @@ and, only if it needs them:
     NEEDS = ("seq_logps",)   # extra inputs the loop must compute (see AdvantageBatch)
     EXTRA_ROLLOUTS = 1       # completions sampled per prompt on top of the group size (MC-GRPO);
                              # they count against the rollout budget like any other
+    GROUP_SIZE = 2           # the only group size the method is defined at (2-GRPO). The run script
+                             # refuses any other budget.group_size
 
 `params` are the method's own settings, from `advantage.params` in its config file. `state` is a
 dict that persists from step to step (EBPO's global prior, KRPO's per-prompt filters, HA-DW's
@@ -72,7 +74,13 @@ class Advantage:
     params: dict = field(default_factory=dict)
     needs: tuple = ()
     extra_rollouts: int = 0
+    group_size: int | None = None      # set only by methods defined at one group size (2-GRPO)
     state: dict = field(default_factory=dict)
+
+    def check_group_size(self, group_size: int) -> None:
+        if self.group_size is not None and group_size != self.group_size:
+            raise ValueError(f"{self.name} is defined only at group size {self.group_size}; "
+                             f"run it with --set budget.group_size={self.group_size}, not {group_size}")
 
     def __call__(self, batch: AdvantageBatch) -> tuple[torch.Tensor, torch.Tensor | None]:
         """(advantages [N] float32, keep [N] bool or None)."""
@@ -105,5 +113,7 @@ def build_advantage(name: str, params: dict | None = None) -> Advantage:
     unknown = set(needs) - KNOWN_NEEDS
     if unknown:
         raise ValueError(f"{name}: the loop cannot provide {sorted(unknown)}; it knows {sorted(KNOWN_NEEDS)}")
+    group_size = getattr(module, "GROUP_SIZE", None)
     return Advantage(name=name, fn=fn, params=dict(params or {}), needs=needs,
-                     extra_rollouts=int(getattr(module, "EXTRA_ROLLOUTS", 0)))
+                     extra_rollouts=int(getattr(module, "EXTRA_ROLLOUTS", 0)),
+                     group_size=None if group_size is None else int(group_size))

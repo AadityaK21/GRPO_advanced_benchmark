@@ -1,0 +1,5 @@
+# 7. CoRPO (arXiv 2511.04439, eqs. 11-12). A = r - max(c, mean). c tuned in {0.25, 0.5, 0.75} on validation.
+advantage:
+  name: corpo
+  params:
+    c: 0.5

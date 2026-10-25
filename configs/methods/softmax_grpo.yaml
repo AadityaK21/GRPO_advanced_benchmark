@@ -1,0 +1,5 @@
+# 6. SoftmaxGRPO (arXiv 2608.09271, eq. 1). A = G softmax(r / tau) - 1. tau tuned in {0.1, 0.3} on validation.
+advantage:
+  name: softmax_grpo
+  params:
+    tau: 0.1

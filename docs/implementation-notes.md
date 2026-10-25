@@ -14,16 +14,16 @@ All sixteen arXiv IDs and titles checked on 11 Oct 2026. "Official code" and "Be
 
 | # | Method | arXiv | Tier | Official code | Beyond the advantage | Our code | Unit test | Authors contacted |
 |---|---|---|---|---|---|---|---|---|
-| 0 | Vanilla GRPO | 2402.03300 | 1 | none in abstract | the reference loop | | | |
-| 1 | Dr. GRPO | 2503.20783 | 1 | github.com/sail-sg/understand-r1-zero | changes the loss normalisation | | | |
-| 2 | DAPO | 2503.14476 | 1 | verl-based release (link in paper) | clip-higher, dynamic sampling, token-level loss, overlong reward shaping | | | |
-| 3 | RLOO | 2402.14740 | 1 | none in abstract | none; proposed for RLHF and compared with PPO | | | |
-| 4 | Sign advantage | 2605.07689 | 1 | none in abstract | none | | | |
-| 5 | NGRPO | 2509.18851 | 1 | github.com/nangongrui-ngr/NGRPO | asymmetric clipping | | | |
-| 6 | SoftmaxGRPO | 2608.09271 | 1 | none in abstract | a temperature parameter | | | |
-| 7 | CoRPO | 2511.04439 | 1 | none in abstract | a correctness threshold | | | |
-| 8 | MC-GRPO | 2601.22582 | 1 | github.com/lotusroot-kim/MC-GRPO | one extra rollout per prompt; count it in the budget | | | |
-| 9 | 2-GRPO | 2510.00977 | 1 | none in abstract | group size 2 only | | | |
+| 0 | Vanilla GRPO | 2402.03300 | 1 | none in abstract | the reference loop | `vanilla.py` | `test_vanilla_spec_example` | |
+| 1 | Dr. GRPO | 2503.20783 | 1 | github.com/sail-sg/understand-r1-zero | changes the loss normalisation | `dr_grpo.py` | `test_dr_grpo_hand_worked_example` | |
+| 2 | DAPO | 2503.14476 | 1 | verl-based release (link in paper) | clip-higher, dynamic sampling, token-level loss, overlong reward shaping | `dapo.py` + `filter` | `test_dapo_*`, `test_dynamic_sampling_*` | |
+| 3 | RLOO | 2402.14740 | 1 | none in abstract | none; proposed for RLHF and compared with PPO | `rloo.py` | `test_rloo_is_leave_one_out` | |
+| 4 | Sign advantage | 2605.07689 | 1 | none in abstract | none | `sign.py` | `test_sign_ignores_the_group` | |
+| 5 | NGRPO | 2509.18851 | 1 | github.com/nangongrui-ngr/NGRPO | asymmetric clipping | `ngrpo.py` | `test_ngrpo_adds_a_virtual_correct_sample` | |
+| 6 | SoftmaxGRPO | 2608.09271 | 1 | none in abstract | a temperature parameter | `softmax_grpo.py` | `test_softmax_grpo` | |
+| 7 | CoRPO | 2511.04439 | 1 | none in abstract | a correctness threshold | `corpo.py` | `test_corpo_threshold` | |
+| 8 | MC-GRPO | 2601.22582 | 1 | github.com/lotusroot-kim/MC-GRPO | one extra rollout per prompt; count it in the budget | `mc_grpo.py` | `test_mc_grpo_*` | |
+| 9 | 2-GRPO | 2510.00977 | 1 | none in abstract | group size 2 only | `two_grpo.py` | `test_two_grpo_is_vanilla_at_group_size_2_only` | |
 | 10 | EBPO | 2602.05165 | 2 | none in abstract | a running global prior (state) | | | |
 | 11 | KRPO | 2505.07527 | 2 | github.com/billhhh/KRPOLLMsRL | a per-prompt Kalman filter (state) | | | |
 | 12 | BV-Blend | 2606.28707 | 2 | none in abstract | semantic prompt clusters plus running statistics (state) | | | |
@@ -135,6 +135,14 @@ Newest first. One line for every decision that could change a number.
 
 | Date | Method | Decision | Why | Re-run needed? |
 |---|---|---|---|---|
+| 2026-10-25 | all | A completion with no counted tokens (a keep-mask row) is out of the loss entirely, including the per-completion denominators of `grpo` and `dr_grpo` | MC-GRPO trains on G of its G + 1 completions; without this, the dropped row would shrink every other row's weight by G/(G+1). No effect without a keep-mask (every sampled row has at least one counted token), so earlier results and the TRL match stand | No |
+| 2026-10-25 | DAPO | Dynamic sampling refills only the missing groups (not a whole new batch as verl does), stops after `filter.max_refills` = 10 rounds or when the next round would pass the budget, and trains on whatever mixed groups it has; zero mixed groups = no update, rollouts still counted | Every rollout counts against the same budget as every other method; sampling only the deficit wastes none. The run ends when the budget is spent, and the lr decays with rollouts spent, not steps | Not yet run |
+| 2026-10-25 | DAPO | Overlong shaping at L_max 512, L_cache 102, penalty x0.5; filtered on accuracy before shaping | Same L_cache / L_max ratio as the paper (0.2); x0.5 because DAPO's reward is +-1 and ours 0/1 (our derivation); the verl code filters on accuracy | Not yet run |
+| 2026-10-25 | MC-GRPO | eps 1e-3 (code), the FIRST completion equal to the median is the one dropped, no (G+1)/nonzero rescale | Paper silent on eps and on which tied completion drops; the rescale is in the GSM trainer only | Not yet run |
+| 2026-10-25 | NGRPO | Sample std (n - 1) over the G + 1 values, eps 1e-6, standard clip with eps_low 0.16 / eps_high 0.24; no entropy bonus, no all-correct resampling | The official code; the paper's eq. 6 (divide by G + 1) disagrees with its own Fig. 3, the code agrees | Not yet run |
+| 2026-10-25 | Sign | Rewards outside [0, 1] raise | A = 2r - 1 is defined for 0/1 rewards only | No |
+| 2026-10-25 | 2-GRPO | Its own file (`GROUP_SIZE = 2`); `run.py` refuses any other `budget.group_size` | A method config cannot change the shared budget, so the guard lives in the method | No |
+| 2026-10-25 | RLOO, SoftmaxGRPO, CoRPO | RLOO uses loss `dr_grpo`; SoftmaxGRPO tau 0.1 and CoRPO c 0.5 by default, both tuned on validation | method-specs.md, sections 3, 6, 7 | Not yet run |
 | 2026-10-19 | all | A method's config changes the loss or sampling only where its paper proposes that change; framework defaults its authors ran (verl token-mean, TRL KL) are recorded as deviations | Keeps the comparison about the estimator, as the plan requires | Not yet run |
 | 2026-10-19 | all | Truncated completions score 0; log `uniform_frac`, `adv_abs_mean`, and the format rate | Dr. GRPO's code; method-specs.md findings 2 and 5 | Not yet run |
 | 2026-10-19 | all | Budget in rollouts: 64 completions per step (prompts per step = 64 // G), 12,800 per run (PROVISIONAL until the week-9 timing run) | The plan fixes rollouts, not steps, so methods that use rollouts differently get no extra compute | Not yet run |
@@ -149,7 +157,8 @@ Newest first. One line for every decision that could change a number.
 - [ ] CoRPO's threshold c under 0/1 rewards (paper used 0, which equals Dr. GRPO's advantage). Proposal: tune c in {0.25, 0.5, 0.75} on validation
 - [ ] MC-GRPO under 0/1 rewards: MAD is always 0, so A = +-1/eps on minority completions only. Email the author: is that intended, and what eps? (Paper silent; code 1e-3)
 - [ ] SoftmaxGRPO's tau: tune in {0.1, 0.3} on validation (paper's 0.1 was picked on test accuracy)
-- [ ] DAPO: the harness needs a refill loop for dynamic sampling (every rollout counted); overlong shaping at 512 tokens (proposal: L_cache 102, penalty x0.5 for 0/1 rewards)
+- [x] DAPO: refill loop for dynamic sampling built (every rollout counted, budget never passed) and overlong shaping at 512 tokens (L_cache 102, penalty x0.5). 25 Oct 2026
+- [ ] DAPO: the training `reward` it logs is over the kept (mixed) groups only. Compare its training curve with others on validation accuracy, not on that number
 - [ ] 
 
 ## Asking authors

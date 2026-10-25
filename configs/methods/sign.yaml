@@ -1,0 +1,3 @@
+# 4. Sign advantage (arXiv 2605.07689, eq. 5). A = 2r - 1. Loss, clip and KL not stated: base config.
+advantage:
+  name: sign

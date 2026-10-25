@@ -1,0 +1,14 @@
+# 2. DAPO (arXiv 2503.14476). Vanilla's advantage plus overlong shaping (eq. 13); clip-higher (4.1);
+# token-level loss (eq. 12); dynamic sampling (3.2), every rollout counted against the budget.
+advantage:
+  name: dapo
+  params:
+    l_max: 512                 # = sampling.max_new_tokens
+    l_cache: 102               # 0.2 of l_max, the paper's 4,096 / 20,480
+    overlong_scale: 0.5        # DAPO's reward is +-1, ours 0/1
+loss:
+  loss_type: dapo
+  eps_low: 0.2
+  eps_high: 0.28
+filter:
+  drop_uniform_groups: true
