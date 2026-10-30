@@ -1,0 +1,5 @@
+# The null control (plan: "two controls you must include"). Exactly vanilla GRPO, run as if it were a
+# separate method, under a DIFFERENT seed stream: seeds 1000-1009, never 0-9. scripts/aggregate.py pools
+# its runs with vanilla's and checks that about 5% of random 10-vs-10 splits exclude zero.
+advantage:
+  name: vanilla
