@@ -3,6 +3,7 @@
     python scripts/run.py --method vanilla --seed 0
     python scripts/run.py --method dr_grpo --seed 3 --set budget.group_size=4
     python scripts/run.py --eval-only --seed 0          # the untrained base model, evaluated identically
+    python scripts/run.py --eval-only --val-only --seed 0   # validation only: the prompt check, tuning
 
 Settings come from configs/base.yaml, then configs/methods/<method>.yaml, then each --set key=value.
 The run writes results/<method>/g<G>/seed<seed>-<time>/ (see src/runlog.py): config, seed, git
@@ -18,7 +19,10 @@ What a run does:
   2. Trains for budget.total_rollouts completions, budget.rollouts_per_step at a time.
   3. Checks greedy validation accuracy before training and every eval.every steps, keeping the best
      step's weights.
-  4. Evaluates the final and the best weights on the test split.
+  4. Evaluates the final and the best weights on the test split (skipped with --val-only).
+
+--val-only never touches the test split, so a choice made from its output (the prompt, tuning) cannot
+leak test information. Its runs go to runs/val_only/ (not results/), so aggregate.py never sees them.
 """
 from __future__ import annotations
 
@@ -60,6 +64,8 @@ def parse_args(argv=None):
                    help="override a config value, e.g. --set budget.group_size=4 (repeatable)")
     p.add_argument("--eval-only", action="store_true", help="no training: evaluate the base model (results/base/)")
     p.add_argument("--smoke", action="store_true", help="tiny budget and eval sets, written under runs/smoke")
+    p.add_argument("--val-only", action="store_true",
+                   help="validation only, no test evaluation (prompt check, tuning); written under runs/val_only")
     p.add_argument("--no-ckpt", action="store_true", help="do not save the best and final weights")
     p.add_argument("--local-data", nargs=2, metavar=("TRAIN_JSONL", "TEST_JSONL"),
                    help="read GSM8K from local files instead of the Hub (tests, offline machines)")
@@ -71,6 +77,8 @@ def main(argv=None) -> Path:
     cfg = load_config(args.method, list(args.set) + (SMOKE if args.smoke else []))
     if args.eval_only:
         cfg["method"] = "base"      # the untrained model: same prompt, same evaluation, its own folder
+    if args.val_only and cfg["results_dir"] == "results":
+        cfg["results_dir"] = "runs/val_only"     # never mixed with benchmark results
     # Build the method first, so a bad method or group size fails before any download or model load.
     advantage = build_advantage(cfg["advantage"]["name"], cfg["advantage"].get("params"))
     advantage.check_group_size(cfg["budget"]["group_size"])
@@ -78,9 +86,17 @@ def main(argv=None) -> Path:
     random.seed(seed)
     torch.manual_seed(seed)        # LoRA initialisation and the sampling stream
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    gpu = torch.cuda.get_device_name(0) if device == "cuda" else "none"
+    print(f"device {device} (GPU: {gpu}), dtype {pick_dtype(device, cfg['model']['dtype'])}, "
+          f"torch {torch.__version__}", flush=True)
+    if device == "cpu":
+        print("WARNING: PyTorch sees no GPU, so this run is on the CPU and a full evaluation takes hours. "
+              "Check the notebook's accelerator and `python -c \"import torch; print(torch.cuda.is_available())\"`",
+              flush=True)
 
     # ---- data -----------------------------------------------------------------------------------
     local = {"train": args.local_data[0], "test": args.local_data[1]} if args.local_data else None
+    print("loading GSM8K", flush=True)
     data = load_gsm8k(cfg["data"]["dataset"], local=local)
     splits = make_splits(data["train"], cfg["data"]["val_size"], cfg["prompt"]["shots"], cfg["data"]["split_seed"])
     train_pool = shuffled(splits["train"], seed)
@@ -89,6 +105,7 @@ def main(argv=None) -> Path:
 
     # ---- model ----------------------------------------------------------------------------------
     m, lora = cfg["model"], cfg["lora"]
+    print(f"loading {m['name']}", flush=True)
     model, tokenizer, ref_model = load_policy(
         m["name"], device, dtype=m["dtype"], tokenizer_name=m.get("tokenizer"),
         gradient_checkpointing=m["gradient_checkpointing"], lora_r=lora["r"], lora_alpha=lora["alpha"],
@@ -101,6 +118,8 @@ def main(argv=None) -> Path:
         return [format_prompt(tokenizer, r["question"], instruction, shots) for r in rows]
 
     val_prompts, val_answers = prompts_for(val), [r["answer"] for r in val]
+    if args.val_only:
+        test = []
     test_prompts, test_answers = prompts_for(test), [r["answer"] for r in test]
 
     # ---- budget ---------------------------------------------------------------------------------
@@ -139,11 +158,18 @@ def main(argv=None) -> Path:
     best = {"step": None, "val_accuracy": -1.0}
     best_weights = None
 
+    def log(line):
+        print(line, flush=True)
+
     def check_val(step):
         nonlocal eval_seconds, best_weights
         t0 = time.perf_counter()
-        res = evaluate(model, tokenizer, val_prompts, val_answers, ec["max_new_tokens"], ec["batch_size"])
+        print(f"validation at step {step}: {len(val_prompts)} problems", flush=True)
+        res = evaluate(model, tokenizer, val_prompts, val_answers, ec["max_new_tokens"], ec["batch_size"], log)
         eval_seconds += time.perf_counter() - t0
+        if step == 0:                        # what the untrained model writes: check the prompt and the parser
+            (run_dir / "val_completions_step0.txt").write_text("\n\n=====\n\n".join(res["completions"]),
+                                                              encoding="utf-8")
         eval_log.write({"step": step, "val_accuracy": res["accuracy"], "val_format_rate": res["format_rate"],
                         "seconds": round(time.perf_counter() - t0, 1)})
         print(f"step {step:4d}  val accuracy {res['accuracy']:.4f}  format {res['format_rate']:.2f}", flush=True)
@@ -231,21 +257,32 @@ def main(argv=None) -> Path:
 
     # ---- test -----------------------------------------------------------------------------------
     t0 = time.perf_counter()
-    final = evaluate(model, tokenizer, test_prompts, test_answers, ec["max_new_tokens"], ec["batch_size"])
-    if not args.no_ckpt and steps:
-        _save(model, ckpt_dir / "final")
-    best_test = final
-    if best["step"] != steps:                 # the best validation step is not the last one
-        _load_trainable_state(model, best_weights)
-        best_test = evaluate(model, tokenizer, test_prompts, test_answers, ec["max_new_tokens"], ec["batch_size"])
-        if not args.no_ckpt:
-            _save(model, ckpt_dir / "best")
+    no_test = {"accuracy": None, "format_rate": None, "correct": [], "completions": []}
+    if args.val_only:
+        final = best_test = no_test
+        if not args.no_ckpt and steps:
+            _save(model, ckpt_dir / "final")
+    else:
+        print(f"test: {len(test_prompts)} problems", flush=True)
+        final = evaluate(model, tokenizer, test_prompts, test_answers, ec["max_new_tokens"], ec["batch_size"], log)
+        if not args.no_ckpt and steps:
+            _save(model, ckpt_dir / "final")
+        best_test = final
+        if best["step"] != steps:                 # the best validation step is not the last one
+            _load_trainable_state(model, best_weights)
+            print(f"test, best validation step {best['step']}", flush=True)
+            best_test = evaluate(model, tokenizer, test_prompts, test_answers, ec["max_new_tokens"],
+                                 ec["batch_size"], log)
+            if not args.no_ckpt:
+                _save(model, ckpt_dir / "best")
+        (ckpt_dir).mkdir(exist_ok=True)
+        (ckpt_dir / "test_completions_final.txt").write_text("\n\n=====\n\n".join(final["completions"]),
+                                                             encoding="utf-8")
     eval_seconds += time.perf_counter() - t0
-    (ckpt_dir).mkdir(exist_ok=True)
-    (ckpt_dir / "test_completions_final.txt").write_text("\n\n=====\n\n".join(final["completions"]), encoding="utf-8")
 
     summary = {
         "method": cfg["method"], "seed": seed, "group_size": b["group_size"], "steps": steps,
+        "val_only": args.val_only,
         "rollouts": rollouts, "budget_rollouts": 0 if args.eval_only else b["total_rollouts"],
         "base_val_accuracy": base_val,
         "final": {"step": steps, "val_accuracy": last_val, "test_accuracy": final["accuracy"],
@@ -261,8 +298,12 @@ def main(argv=None) -> Path:
     }
     eval_log.close()
     write_json(run_dir / "summary.json", summary)
-    print(f"test accuracy: final {final['accuracy']:.4f}, best (step {best['step']}) {best_test['accuracy']:.4f}  "
-          f"| {summary['wall_clock_seconds'] / 60:.1f} min  | {run_dir}", flush=True)
+    if args.val_only:
+        print(f"validation accuracy: final {last_val:.4f}, best (step {best['step']}) {best['val_accuracy']:.4f}  "
+              f"(no test)  | {summary['wall_clock_seconds'] / 60:.1f} min  | {run_dir}", flush=True)
+    else:
+        print(f"test accuracy: final {final['accuracy']:.4f}, best (step {best['step']}) {best_test['accuracy']:.4f}  "
+              f"| {summary['wall_clock_seconds'] / 60:.1f} min  | {run_dir}", flush=True)
     return run_dir
 
 

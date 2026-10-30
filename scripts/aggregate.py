@@ -33,6 +33,9 @@ def collect(results: Path) -> tuple[dict, list[str]]:
     for summary in sorted(results.glob("*/g*/seed*/summary.json")):
         run_dir = summary.parent
         s = json.loads(summary.read_text())
+        if s.get("val_only"):        # no test numbers: a prompt check or tuning run in the wrong folder
+            notes.append(f"{run_dir}: a --val-only run, skipped")
+            continue
         meta_file = run_dir / "meta.json"
         meta = json.loads(meta_file.read_text()) if meta_file.exists() else {}
         runs[(s["method"], s["group_size"])][s["seed"]].append({"dir": run_dir, "summary": s, "meta": meta})

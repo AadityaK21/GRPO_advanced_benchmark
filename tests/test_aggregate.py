@@ -49,3 +49,15 @@ def test_aggregate_ranks_compares_and_flags(tmp_path):
 
     best = _load().main(["--results", str(tmp_path), "--reps", "2000", "--metric", "best"])
     assert best["conditions"][0]["iqm"] != out["conditions"][0]["iqm"]
+
+
+def test_val_only_runs_are_skipped(tmp_path):
+    for s in range(3):
+        _run(tmp_path, "vanilla", 8, s, 0.35 + 0.01 * s)
+    d = _run(tmp_path, "base", 8, 0, 0.20)
+    summary = json.loads((d / "summary.json").read_text())
+    summary.update(val_only=True, final={"test_accuracy": None}, best={"test_accuracy": None})
+    (d / "summary.json").write_text(json.dumps(summary))
+    out = _load().main(["--results", str(tmp_path), "--reps", "500"])
+    assert all(c["method"] != "base" for c in out["conditions"]), "a run without test numbers is not a condition"
+    assert any("--val-only" in n for n in out["notes"])

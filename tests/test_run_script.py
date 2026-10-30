@@ -117,6 +117,40 @@ def test_eval_only_is_the_base_model(setup):
     assert s["final"]["test_accuracy"] == s["best"]["test_accuracy"]
 
 
+def test_val_only_never_evaluates_the_test_split(setup):
+    script = _load_script()
+    seen, real = [], script.evaluate
+
+    def spy(model, tokenizer, prompts, *args, **kwargs):
+        seen.append(list(prompts))
+        return real(model, tokenizer, prompts, *args, **kwargs)
+
+    script.evaluate = spy
+    run_dir = script.main(_args(setup, "vanilla", "--eval-only", "--val-only"))
+    test_prompts = {f"t{k} t{k + 1}" for k in range(30, 36)}    # the tiny template keeps the question
+    assert len(seen) == 1 and len(seen[0]) == 4, "one evaluation: the 4 validation problems"
+    assert not set(seen[0]) & test_prompts, "no test problem was evaluated"
+    s = json.loads((run_dir / "summary.json").read_text())
+    assert s["val_only"] and s["test_problems"] == 0
+    assert s["final"]["test_accuracy"] is None and s["best"]["test_accuracy"] is None
+    assert s["base_val_accuracy"] == s["best"]["val_accuracy"]
+    assert len((run_dir / "val_completions_step0.txt").read_text().split("=====")) == 4
+    assert not (run_dir / "ckpt" / "test_completions_final.txt").exists()
+
+
+def test_evaluation_logs_one_line_per_batch(setup):
+    from src.eval.accuracy import evaluate
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    model = AutoModelForCausalLM.from_pretrained(setup / "model")
+    tokenizer = AutoTokenizer.from_pretrained(setup / "tokenizer")
+    lines = []
+    prompts = [f"t{k} t{k + 1}" for k in range(5)]
+    res = evaluate(model, tokenizer, prompts, ["#### 1"] * 5, max_new_tokens=2, batch_size=2, log=lines.append)
+    assert len(lines) == 3 and "3/3" in lines[-1] and "5/5 problems" in lines[-1]
+    assert res == evaluate(model, tokenizer, prompts, ["#### 1"] * 5, max_new_tokens=2, batch_size=2), \
+        "logging does not change the result"
+
+
 @pytest.mark.parametrize("method", ["dapo", "rloo", "sign", "ngrpo", "softmax_grpo", "corpo", "mc_grpo", "two_grpo",
                                     "ebpo", "krpo", "bv_blend", "ha_dw", "signbalance", "lens"])
 def test_every_method_runs_end_to_end(setup, method):
