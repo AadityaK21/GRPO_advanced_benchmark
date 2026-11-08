@@ -1,0 +1,36 @@
+# The equal-budget tuning sweep, run by scripts/tune.py (plan: "equal tuning budget on a 500-problem
+# validation split"). Every method gets the same number of trials, the same trial length, the same seeds
+# and the same validation problems. Only validation accuracy is read; the test split is never evaluated.
+# Change this file only before tuning starts, and record the change in docs/implementation-notes.md.
+
+trials: 8                      # trials per method, the same for every method (vanilla included)
+seeds: [2000]                  # each trial is scored on the mean over these seeds. Disjoint from the
+                               # benchmark seeds (0-9) and the null control's (1000-1009)
+plan_seed: 0                   # fixes where in its lr stratum each trial sits. Never tie it to results
+score: final                   # validation accuracy of the final weights (the primary metric uses the
+                               # final weights). `best` would use the best validation check instead
+group_size: 8                  # tune at the falsification group size and reuse the values at G 4 and 16.
+                               # 2-GRPO is tuned at its own G = 2
+
+overrides:                     # applied to every trial, after the method's config
+  - budget.total_rollouts=3200 # PROVISIONAL: a quarter of a full run. Set from the timing run
+  - eval.at_start=false        # the base model's accuracy is the same for every trial
+  - eval.every=1000000         # validate once, at the end
+
+lr:                            # log-uniform. The range is split into `trials` equal strata of log(lr) and
+  low: 1.0e-6                  # each trial draws one lr inside its own stratum, so the range is covered
+  high: 1.0e-4                 # evenly. Same range for every method: Adam undoes a constant scale of the
+                               # loss, so a method with larger or smaller advantages does not need its
+                               # own range by default. If the chosen lr lands in the lowest or highest
+                               # stratum, `collect` warns: widen that method's range below and re-run its
+                               # whole sweep with the same number of trials (decision log)
+
+lr_ranges: {}                  # per-method range, e.g. krpo: {low: 1.0e-7, high: 1.0e-5}. Only with a
+                               # reason in the decision log
+
+params:                        # each method's own free parameters. Values are spread over the trials in
+                               # turn (trial i gets value i mod n), so every value meets low and high lrs
+  softmax_grpo: {tau: [0.1, 0.3]}           # method-specs.md section 6: paper picked 0.1 on test
+  corpo: {c: [0.25, 0.5, 0.75]}             # section 7: no guidance under 0/1 rewards
+  ha_dw: {eta: [0.1, 10.0]}                 # tier 2 specs: 0.1 (TRL PR) vs ours 10
+  bv_blend: {T: [0.05, 0.1, 0.2]}           # tier 2 specs: paper silent on T

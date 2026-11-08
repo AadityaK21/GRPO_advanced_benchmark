@@ -1,0 +1,43 @@
+# Every benchmark run, block by block, in the plan's order. scripts/grid.py turns this into run.py
+# commands, skips what is finished, and runs the rest (one job per method, group size and seed).
+#
+# A block entry: method or methods, group_sizes, and optionally seeds, eval_only and sets (extra --set
+# overrides, e.g. a model). A block with use_tuned: true adds each method's values from configs/tuned.yaml
+# (vanilla_null takes vanilla's) and refuses to start for a method that has none.
+# results_dir keeps blocks that must never be pooled apart (Gate 1's provisional lr, the 1.5B model).
+
+seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+blocks:
+  gate1:                       # week 10: vanilla at the PROVISIONAL lr vs the base model. Before tuning
+    use_tuned: false
+    results_dir: results_gate1
+    entries:
+      - {method: vanilla, group_sizes: [8]}
+      - {method: base, eval_only: true, seeds: [0]}     # greedy is deterministic: one run (pass@k sampled once)
+
+  tier1:                       # the falsification test and the group-size sweep
+    use_tuned: true
+    entries:
+      - {methods: [vanilla, dr_grpo, dapo, rloo, sign, ngrpo, softmax_grpo, corpo, mc_grpo], group_sizes: [8, 4, 16]}
+      - {method: two_grpo, group_sizes: [2]}
+      - {method: base, eval_only: true, seeds: [0]}
+
+  null_control:                # vanilla under another seed stream (the key `null` would read as YAML null)
+    use_tuned: true
+    entries:
+      - {method: vanilla_null, group_sizes: [8], seeds: [1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009]}
+
+  scale_1p5b:                  # the 1.5B check: Tier 1 at G 8 (2-GRPO at 2), the 0.5B tuned values
+    use_tuned: true
+    results_dir: results_1p5b
+    entries:
+      - {methods: [vanilla, dr_grpo, dapo, rloo, sign, ngrpo, softmax_grpo, corpo, mc_grpo], group_sizes: [8],
+         sets: [model.name=Qwen/Qwen2.5-1.5B-Instruct]}
+      - {method: two_grpo, group_sizes: [2], sets: [model.name=Qwen/Qwen2.5-1.5B-Instruct]}
+      - {method: base, eval_only: true, seeds: [0], sets: [model.name=Qwen/Qwen2.5-1.5B-Instruct]}
+
+  tier2:                       # exploratory, G 8 only
+    use_tuned: true
+    entries:
+      - {methods: [ebpo, krpo, bv_blend, ha_dw, signbalance, lens], group_sizes: [8]}

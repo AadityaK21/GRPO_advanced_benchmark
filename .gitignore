@@ -6,3 +6,6 @@ __pycache__/
 .pytest_tmp/
 runs/
 results/**/ckpt/
+results/.claims/
+results_*/**/ckpt/
+logs/

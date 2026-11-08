@@ -28,7 +28,7 @@ nothing works. That is why the correction is there.
 ## Running
 
 ```
-pip install torch==2.14.1 transformers==5.19.0 trl==1.15.0 datasets peft pyyaml pytest
+pip install torch==2.14.1 transformers==5.19.0 trl==1.15.0 datasets peft pyyaml pytest scikit-learn matplotlib scipy
 pytest                                                           # all tests, CPU, under a minute
 
 python scripts/run.py --method vanilla --seed 0 --smoke          # whole pipeline in a few minutes
@@ -39,7 +39,17 @@ python scripts/run.py --method dr_grpo --seed 0 --set budget.group_size=4
 python scripts/run.py --method two_grpo --seed 0 --set budget.group_size=2   # 2-GRPO runs only at G = 2
 python scripts/run.py --eval-only --seed 0                       # the untrained base model
 python scripts/aggregate.py                                      # IQM table and the falsification test
+
+python scripts/tune.py plan                                      # the tuning trials, nothing runs
+python scripts/tune.py run                                       # run unfinished trials (validation only)
+python scripts/tune.py collect                                   # best trial per method -> configs/tuned.yaml
+python scripts/grid.py status                                    # the benchmark grid (configs/grid.yaml)
+python scripts/grid.py worker --block tier1                      # run pending jobs (HPC: hpc/grid_worker.pbs)
+python scripts/figures.py                                        # every figure and table from results/
 ```
+
+Each test-split run also reports pass@1/4/16 of the final weights (16 sampled completions per problem):
+a secondary metric, outside the falsification rule.
 
 Tier 1 methods (`--method`): `vanilla`, `dr_grpo`, `dapo`, `rloo`, `sign`, `ngrpo`, `softmax_grpo`, `corpo`,
 `mc_grpo`, `two_grpo`. Tier 2: `ebpo`, `krpo`, `bv_blend`, `ha_dw`, `signbalance`, `lens`. What each paper
@@ -58,8 +68,10 @@ Commit before a benchmark run: a run from a tree with uncommitted changes is fla
 - `src/advantages/`: one file per method, all with the same signature (see `base.py`).
 - `src/train/`: the GRPO loop. Nothing method-specific. `logprobs.py` scores the output layer in chunks.
 - `src/reward/`: the GSM8K answer parser and exact-match reward.
-- `src/data.py`: the fixed validation split and few-shot examples. `src/eval/`: accuracy and statistics.
-- `scripts/run.py`: one run. `scripts/aggregate.py`: all runs. `scripts/train_grpo.py` and
+- `src/data.py`: the fixed validation split and few-shot examples. `src/eval/`: accuracy, pass@k and statistics.
+- `scripts/run.py`: one run. `scripts/aggregate.py`: all runs. `scripts/tune.py`: the tuning sweep
+  (`configs/tuning.yaml`). `scripts/grid.py`: every benchmark run (`configs/grid.yaml`, `hpc/`).
+  `scripts/figures.py`: the paper's figures and tables. `scripts/train_grpo.py` and
   `scripts/train_trl.py`: the week-7 check that this loop matches TRL.
 - `docs/implementation-notes.md`: every choice a paper leaves open, and the verification log.
   `docs/compute.md`: measured time per run and the grid that fits.

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+import torch
 import yaml
 
 from tiny import make_model, make_tokenizer
@@ -92,6 +93,10 @@ def test_a_run_writes_config_seed_commit_and_results(setup, method):
     assert 0.0 <= s["final"]["test_format_rate"] <= 1.0 and "val_format_rate" in evals[0]
     for key in ("uniform_frac", "adv_abs_mean"):
         assert key in train[0], key
+    k = s["passk"]                                  # base.yaml: 16 samples per test problem, final weights
+    assert s["passk_status"] == "done"
+    assert k["samples"] == 16 and k["problems"] == 6 and len(k["correct_counts"]) == 6
+    assert 0.0 <= k["pass@1"] <= k["pass@4"] <= k["pass@16"] <= 1.0
 
 
 def test_seeds_change_the_run_and_repeat_exactly(setup):
@@ -132,10 +137,62 @@ def test_val_only_never_evaluates_the_test_split(setup):
     assert not set(seen[0]) & test_prompts, "no test problem was evaluated"
     s = json.loads((run_dir / "summary.json").read_text())
     assert s["val_only"] and s["test_problems"] == 0
-    assert s["final"]["test_accuracy"] is None and s["best"]["test_accuracy"] is None
+    assert s["final"]["test_accuracy"] is None and s["best"]["test_accuracy"] is None and s["passk"] is None
     assert s["base_val_accuracy"] == s["best"]["val_accuracy"]
     assert len((run_dir / "val_completions_step0.txt").read_text().split("=====")) == 4
     assert not (run_dir / "ckpt" / "test_completions_final.txt").exists()
+
+
+def test_without_the_start_check_only_trained_weights_are_validated(setup):
+    """eval.at_start=false (tuning trials): no step-0 validation; --eval-only still validates the base model."""
+    script = _load_script()
+    run_dir = script.main(_args(setup, "vanilla", "--no-ckpt") + ["--set", "eval.at_start=false",
+                                                                 "--set", "eval.passk_samples=0"])
+    evals = [json.loads(line) for line in (run_dir / "eval.jsonl").read_text().splitlines()]
+    s = json.loads((run_dir / "summary.json").read_text())
+    assert [e["step"] for e in evals] == [1, 2] and s["base_val_accuracy"] is None
+    assert s["best"]["step"] in (1, 2) and s["passk"] is None, "passk_samples 0 switches pass@k off"
+    base = script.main(_args(setup, "vanilla", "--eval-only") + ["--set", "eval.at_start=false"])
+    assert json.loads((base / "summary.json").read_text())["base_val_accuracy"] is not None
+
+
+def test_a_crash_during_pass_at_k_keeps_the_finished_run(setup):
+    """pass@k runs after summary.json is written: if it dies, the run's primary numbers survive."""
+    script = _load_script()
+    seen = {}
+
+    def crash(model, *args, **kwargs):
+        seen["weights"] = {n: p.detach().clone() for n, p in model.named_parameters() if p.requires_grad}
+        raise RuntimeError("CUDA out of memory (simulated)")
+    script.evaluate_passk = crash
+    with pytest.raises(RuntimeError, match="simulated"):
+        script.main(_args(setup, "vanilla", "--no-ckpt") + ["--set", "eval.every=100"])
+    run_dir = max((setup / "results" / "vanilla" / "g2").glob("seed0-*"), key=lambda p: p.name)
+    s = json.loads((run_dir / "summary.json").read_text())
+    assert s["passk_status"] == "pending" and s["passk"] is None
+    assert s["final"]["test_accuracy"] is not None and s["steps"] == 2
+
+
+def test_pass_at_k_uses_the_final_weights_even_when_best_is_earlier(setup):
+    script = _load_script()
+    seen = {}
+    real = script.evaluate_passk
+
+    def spy(model, *args, **kwargs):
+        seen["weights"] = {n: p.detach().clone() for n, p in model.named_parameters() if p.requires_grad}
+        return real(model, *args, **kwargs)
+    script.evaluate_passk = spy
+    saved = {}
+    real_save = script._save
+    script._save = lambda model, path: saved.setdefault(path.name, {n: p.detach().clone()
+                                                                     for n, p in model.named_parameters() if p.requires_grad})
+    run_dir = script.main(_args(setup, "vanilla") + ["--set", "eval.passk_samples=2"])
+    script._save = real_save
+    s = json.loads((run_dir / "summary.json").read_text())
+    if s["best"]["step"] == s["steps"]:
+        pytest.skip("the best step is the last one in this run: nothing to swap back")
+    assert all(torch.equal(seen["weights"][n], saved["final"][n]) for n in saved["final"]), "pass@k on the final weights"
+    assert not all(torch.equal(seen["weights"][n], saved["best"][n]) for n in saved["best"])
 
 
 def test_evaluation_logs_one_line_per_batch(setup):

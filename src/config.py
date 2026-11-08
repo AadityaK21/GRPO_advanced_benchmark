@@ -71,6 +71,55 @@ def dump(cfg: dict) -> str:
     return yaml.safe_dump(cfg, sort_keys=False)
 
 
+# Settings that change memory use or where files go, not the numbers a run produces. Two runs that differ
+# only in these count as the same condition.
+MEMORY_ONLY = {"results_dir", "budget.micro_batch_size", "eval.batch_size", "eval.passk_prompts_per_batch",
+               "model.gradient_checkpointing"}
+
+
+def flatten(cfg: dict, prefix: str = "") -> dict:
+    """{'budget.group_size': 8, ...}: one entry per leaf value."""
+    out = {}
+    for key, value in cfg.items():
+        path = f"{prefix}{key}"
+        if isinstance(value, dict) and value:
+            out.update(flatten(value, f"{path}."))
+        else:
+            out[path] = value
+    return out
+
+
+def comparable(cfg: dict, ignore=()) -> dict:
+    """The flattened settings that can change a run's numbers (MEMORY_ONLY and `ignore` left out).
+    A key in `ignore` ending in '.' drops the whole section (e.g. 'advantage.')."""
+    skip = MEMORY_ONLY | set(ignore)
+    return {k: v for k, v in flatten(cfg).items()
+            if k not in skip and not any(s.endswith(".") and k.startswith(s) for s in skip)}
+
+
+def differences(a: dict, b: dict, ignore=()) -> list[str]:
+    """Keys whose values differ between two configs (floats compared to 1e-9 relative)."""
+    fa, fb = comparable(a, ignore), comparable(b, ignore)
+    out = []
+    for key in sorted(set(fa) | set(fb)):
+        x, y = fa.get(key, KeyError), fb.get(key, KeyError)
+        if isinstance(x, (int, float)) and isinstance(y, (int, float)) and not isinstance(x, bool) and not isinstance(y, bool):
+            if abs(float(x) - float(y)) > 1e-9 * max(1.0, abs(float(x)), abs(float(y))):
+                out.append(key)
+        elif x != y:
+            out.append(key)
+    return out
+
+
+def fingerprint(cfg: dict) -> str:
+    """A short hash of the settings that can change a run's numbers."""
+    import hashlib
+    import json
+    flat = {k: (float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else v)
+            for k, v in comparable(cfg).items()}
+    return hashlib.sha1(json.dumps(flat, sort_keys=True, default=str).encode()).hexdigest()[:10]
+
+
 def _read(path: Path) -> dict:
     with open(path, encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}

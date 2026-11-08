@@ -1,0 +1,30 @@
+#!/bin/bash
+# One GPU worker for the benchmark grid on the IIT Delhi HPC (PBS Pro). It runs pending jobs of one
+# block, one after another, until the block is done or the walltime is nearly used. Several workers can
+# run at once on the same block: each job is claimed, so none runs twice.
+#
+# Submit from the repo folder on the login node (give your project code with -P and the block with -v):
+#     qsub -P <project> -v BLOCK=tier1,MINUTES=40 hpc/grid_worker.pbs
+#     qsub -P <project> -v BLOCK=tier1,MINUTES=40 -J 1-4 hpc/grid_worker.pbs    # 4 workers in parallel
+# Check:  qstat -u $USER          Results so far:  python scripts/grid.py status
+#
+# Before the first job: hpc/setup_offline.sh on the login node (compute nodes have no internet).
+#PBS -N grpo-grid
+#PBS -l select=1:ncpus=8:ngpus=1:mem=32G
+#PBS -l walltime=24:00:00
+#PBS -j oe
+
+set -euo pipefail
+cd "$PBS_O_WORKDIR"
+BLOCK=${BLOCK:?pass the block with qsub -v BLOCK=tier1}
+MINUTES=${MINUTES:-60}            # minutes per run, from docs/compute.md
+HOURS=${HOURS:-23.5}              # stop starting runs before this (walltime 24 h)
+
+source .venv/bin/activate
+export HF_HOME=${HF_HOME:-$HOME/hf_cache}
+export HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TOKENIZERS_PARALLELISM=false
+
+nvidia-smi --query-gpu=name,memory.total --format=csv
+python -c "import torch; assert torch.cuda.is_available(), 'no GPU visible'; print(torch.cuda.get_device_name(0))"
+
+python scripts/grid.py worker --block "$BLOCK" --hours "$HOURS" --minutes-per-run "$MINUTES"

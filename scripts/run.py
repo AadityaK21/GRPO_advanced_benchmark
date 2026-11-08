@@ -19,7 +19,9 @@ What a run does:
   2. Trains for budget.total_rollouts completions, budget.rollouts_per_step at a time.
   3. Checks greedy validation accuracy before training and every eval.every steps, keeping the best
      step's weights.
-  4. Evaluates the final and the best weights on the test split (skipped with --val-only).
+  4. Evaluates the final and the best weights on the test split (skipped with --val-only), writes
+     summary.json, then adds pass@k of the final weights (eval.passk_samples sampled completions per
+     test problem) to it.
 
 --val-only never touches the test split, so a choice made from its output (the prompt, tuning) cannot
 leak test information. Its runs go to runs/val_only/ (not results/), so aggregate.py never sees them.
@@ -46,6 +48,7 @@ from src.advantages.base import build_advantage  # noqa: E402
 from src.config import load_config  # noqa: E402
 from src.data import format_prompt, load_gsm8k, make_splits, shuffled  # noqa: E402
 from src.eval.accuracy import evaluate  # noqa: E402
+from src.eval.passk import evaluate_passk  # noqa: E402
 from src.reward.gsm8k import exact_match_reward  # noqa: E402
 from src.runlog import JsonlWriter, new_run_dir, write_json, write_start  # noqa: E402
 from src.train.loop import GRPOSettings, grpo_step  # noqa: E402
@@ -53,7 +56,7 @@ from src.train.model import load_policy, pick_dtype  # noqa: E402
 
 SMOKE = ["budget.rollouts_per_step=16", "budget.total_rollouts=32", "budget.micro_batch_size=8",
          "sampling.max_new_tokens=128", "eval.every=1", "eval.val_problems=16", "eval.test_problems=16",
-         "eval.max_new_tokens=128", "results_dir=runs/smoke"]
+         "eval.max_new_tokens=128", "eval.passk_samples=4", "eval.passk_problems=8", "results_dir=runs/smoke"]
 
 
 def parse_args(argv=None):
@@ -178,7 +181,8 @@ def main(argv=None) -> Path:
             best_weights = _trainable_state(model)
         return res["accuracy"]
 
-    base_val = check_val(0)
+    # The untrained model's validation accuracy. Always checked when there is no training (--eval-only).
+    base_val = check_val(0) if ec["at_start"] or not steps else None
     last_val = base_val
 
     # ---- training -------------------------------------------------------------------------------
@@ -258,6 +262,7 @@ def main(argv=None) -> Path:
     # ---- test -----------------------------------------------------------------------------------
     t0 = time.perf_counter()
     no_test = {"accuracy": None, "format_rate": None, "correct": [], "completions": []}
+    passk = None
     if args.val_only:
         final = best_test = no_test
         if not args.no_ckpt and steps:
@@ -265,6 +270,7 @@ def main(argv=None) -> Path:
     else:
         print(f"test: {len(test_prompts)} problems", flush=True)
         final = evaluate(model, tokenizer, test_prompts, test_answers, ec["max_new_tokens"], ec["batch_size"], log)
+        final_weights = _trainable_state(model) if ec["passk_samples"] else None   # pass@k comes last
         if not args.no_ckpt and steps:
             _save(model, ckpt_dir / "final")
         best_test = final
@@ -292,18 +298,39 @@ def main(argv=None) -> Path:
         "test_problems": len(test),
         "test_correct_final": "".join(map(str, final["correct"])),
         "test_correct_best": "".join(map(str, best_test["correct"])),
+        "passk": passk,             # final weights: pass@1/4/16 and the correct count per problem
+        # pass@k runs after this summary is first written, so a crash or a walltime kill during its long
+        # sampling loses only pass@k, never the finished run. "pending" in a summary means it was lost.
+        "passk_status": "off" if args.val_only or not ec["passk_samples"] else "pending",
         "train_seconds": round(train_seconds, 1), "eval_seconds": round(eval_seconds, 1),
         "wall_clock_seconds": round(time.perf_counter() - t_start, 1),
         "gpu_peak_gb": round(torch.cuda.max_memory_allocated() / 2**30, 2) if device == "cuda" else None,
     }
     eval_log.close()
     write_json(run_dir / "summary.json", summary)
+    if summary["passk_status"] == "pending":
+        t0 = time.perf_counter()
+        if best["step"] != steps:
+            _load_trainable_state(model, final_weights)     # back to the final weights
+        k_test = test_prompts[: ec["passk_problems"]] if ec["passk_problems"] else test_prompts
+        print(f"pass@k (final weights): {len(k_test)} problems x {ec['passk_samples']} samples", flush=True)
+        passk = evaluate_passk(model, tokenizer, k_test, test_answers[: len(k_test)], ec["passk_samples"],
+                               ec["max_new_tokens"], cfg["sampling"]["temperature"],
+                               prompts_per_batch=ec["passk_prompts_per_batch"], seed=seed, log=log)
+        eval_seconds += time.perf_counter() - t0
+        summary.update(passk=passk, passk_status="done", eval_seconds=round(eval_seconds, 1),
+                       wall_clock_seconds=round(time.perf_counter() - t_start, 1))
+        if device == "cuda":
+            summary["gpu_peak_gb"] = round(torch.cuda.max_memory_allocated() / 2**30, 2)
+        write_json(run_dir / "summary.json", summary)
     if args.val_only:
         print(f"validation accuracy: final {last_val:.4f}, best (step {best['step']}) {best['val_accuracy']:.4f}  "
               f"(no test)  | {summary['wall_clock_seconds'] / 60:.1f} min  | {run_dir}", flush=True)
     else:
+        ks = "  ".join(f"{k} {v:.4f}" for k, v in (passk or {}).items() if k.startswith("pass@"))
         print(f"test accuracy: final {final['accuracy']:.4f}, best (step {best['step']}) {best_test['accuracy']:.4f}  "
-              f"| {summary['wall_clock_seconds'] / 60:.1f} min  | {run_dir}", flush=True)
+              + (f"| {ks}  " if ks else "")
+              + f"| {summary['wall_clock_seconds'] / 60:.1f} min  | {run_dir}", flush=True)
     return run_dir
 
 

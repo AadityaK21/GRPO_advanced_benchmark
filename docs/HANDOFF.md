@@ -1,8 +1,9 @@
 # Project 1 handoff: GRPO advantage benchmark
 
 Written 28 Oct 2026 for anyone, human or LLM, who picks up this repo. Read this file first, then
-`README.md`, then the files it points to. Everything below is checked against the repo at commit
-83cd360 plus the files listed under "Uncommitted at the time of writing".
+`README.md`, then the files it points to. Updated 8 Nov 2026: the tuning sweep, pass@k, the HPC grid
+and the figure script now exist (code and tests only; none has run on a GPU yet). Everything below is
+checked against commit 242cdec plus the files listed under "Uncommitted at the time of writing".
 
 ---
 
@@ -36,7 +37,7 @@ expected outcome is honest either way: a practical guide if some methods really 
 - Every decision that could change a number goes into `docs/implementation-notes.md` (decision log)
   BEFORE the run that uses it.
 
-## 3. Where things stand (28 Oct 2026)
+## 3. Where things stand (8 Nov 2026)
 
 **Done and verified**
 
@@ -49,7 +50,8 @@ expected outcome is honest either way: a practical guide if some methods really 
 | Statistics checked under the null (simulated) | Unpaired IQM intervals exclude 0 in 4.6% of null splits; the paired test rejects 6.0-6.5% (slightly above 5%: the real null control matters) |
 | Falsification rule written in `README.md` | Written before any benchmark run. Do not edit it |
 | All 16 methods implemented, each from its paper's equations | Unit tests reproduce every hand-worked example in `docs/method-specs.md` and `docs/method-specs-tier2.md` to 4 decimals |
-| Test suite | 232 passed, 1 skipped on CPU (the skip is the Triton-kernel TRL check, which runs on a GPU) |
+| Tuning sweep, pass@k, HPC grid, figures, compute report (8 Nov) | `scripts/tune.py`, `src/eval/passk.py`, `scripts/grid.py` + `hpc/`, `scripts/figures.py`, `scripts/compute_report.py`. Tested on the tiny model and on fake results, then checked by an independent review agent; its 9 findings are fixed and each has a test. Never run on a GPU |
+| Test suite | 273 passed, 1 skipped on CPU (the skip is the Triton-kernel TRL check, which runs on a GPU) |
 
 **Not done yet (in the order it should happen: see section 8)**
 
@@ -61,16 +63,23 @@ expected outcome is honest either way: a practical guide if some methods really 
 4. The timing run (one full vanilla run, evaluation included) and the compute budget in `docs/compute.md`.
 5. IIT Delhi HPC access (A100-class GPUs, bf16). Not requested/confirmed yet.
 6. Gate 1: vanilla (10 seeds) vs the base model.
-7. Missing code: a tuning-sweep script, pass@k evaluation, HPC job scripts, figure scripts (section 10).
+7. Missing code: only the optional mid-run checkpoint/resume (section 10). Everything else exists.
 8. Author emails for ambiguous papers (MC-GRPO first).
 9. A human re-read of the six Tier 2 papers (their specs were extracted through a web-fetch tool).
 
 **Commits so far (newest first)**
+`242cdec` eval progress lines, device check, `--val-only` · `d93356c` null control, handoff ·
 `83cd360` Tier 2 methods, smoke_all, clusters script · `0d21b70` Tier 1 methods, DAPO dynamic sampling ·
 `a027dd0` method specs, truncation rule, diagnostics · `1a092be` verification log · `c012536` harness,
 advantage interface, aggregation, Dr. GRPO · `027152c` chunked log-probs.
 
-**Uncommitted at the time of writing:** `configs/methods/vanilla_null.yaml` and this file.
+**Uncommitted at the time of writing (8 Nov):** new `src/eval/passk.py`, `scripts/tune.py`,
+`scripts/grid.py`, `scripts/figures.py`, `scripts/compute_report.py`, `configs/tuning.yaml`, `configs/grid.yaml`, `hpc/` (3 files),
+`tests/test_passk.py`, `tests/test_tune.py`, `tests/test_grid.py`, `tests/test_figures.py`,
+`tests/test_compute_report.py`; changed
+`configs/base.yaml` (eval.at_start, eval.passk_*), `scripts/run.py`, `scripts/aggregate.py`,
+`tests/test_run_script.py`, `tests/test_aggregate.py`, `.gitignore`, `README.md`, this file,
+`docs/implementation-notes.md`, `docs/compute.md`.
 
 ## 4. Repo map
 
@@ -83,6 +92,10 @@ configs/
                           PROVISIONAL are frozen after the timing run and Gate 1
   methods/<name>.yaml     One per method. May set ONLY the `advantage`, `loss` and `filter` sections
                           (src/config.py enforces it). 17 files incl. vanilla_null
+  tuning.yaml             The tuning budget: trials per method, seeds, trial length, lr range, params
+  grid.yaml               Every benchmark run, block by block (gate1, tier1, null_control, scale_1p5b, tier2)
+  tuned.yaml              Written by `tune.py collect` (not yet: no tuning has run). Commit it
+hpc/                      grid_worker.pbs (IIT Delhi, PBS), grid_array.slurm, setup_offline.sh
 src/
   config.py               load_config(method, overrides): base.yaml + method file + --set overrides.
                           Unknown keys are errors (typos never pass silently)
@@ -99,13 +112,20 @@ src/
     loop.py               grpo_step(): one full step. Dynamic sampling refill (DAPO) lives here
     model.py              load_policy(): model, tokenizer, LoRA, dtype
   eval/accuracy.py        Greedy evaluation: accuracy, format rate, per-problem correctness
+  eval/passk.py           pass@k: n sampled completions per test problem, unbiased estimator (Chen et al.)
   eval/stats.py           IQM, percentile bootstrap, paired bootstrap, Holm, null control
   runlog.py               Run folders, config/seed/commit/meta writing
 scripts/
   run.py                  ONE run: train under a rollout budget, validate, test. The main entry point
   smoke_all.py            Every method at smoke size, one table (GPU check, not a result)
   make_clusters.py        Prompt clusters for BV-Blend (sentence-transformers + k-means)
-  aggregate.py            All runs -> IQM table with intervals + the falsification test + null control
+  aggregate.py            All runs -> IQM table with intervals + the falsification test + null control,
+                          plus pass@k (secondary, exploratory: outside the Holm family)
+  tune.py                 The equal-budget tuning sweep: plan / run / collect -> configs/tuned.yaml
+  grid.py                 The benchmark grid from configs/grid.yaml: status / list / worker / run-one.
+                          Resumable, claims jobs so workers never collide, refuses uncommitted code
+  figures.py              Every paper figure (PDF, PNG, CSV) and table (md, tex) from results/
+  compute_report.py       After the timing run: measured minutes per run -> GPU-hours of the whole plan
   train_grpo.py, train_trl.py, compare_runs.py   The week-7 "our loop vs TRL" check
 notebooks/kaggle_smoke_all.ipynb   Clone (token from Kaggle Secrets), clusters, smoke_all
 docs/
@@ -116,7 +136,7 @@ docs/
   method-specs-tier2.md   Tier 2: same, from six research agents (see the caveat at its top)
   compute.md              Time per run and the grid (EMPTY: filled by the timing run)
   grpo-loop.md            How the loop and its tests are organised; laptop setup
-tests/                    232 tests, CPU only, offline. tiny.py builds a 2-layer Qwen2 for them
+tests/                    273 tests, CPU only, offline. tiny.py builds a 2-layer Qwen2 for them
 warmup/                   REINFORCE (CartPole) and PPO from scratch, weeks 1-4 (on the laptop copy)
 results/, runs/           Run outputs (git-ignored)
 ```
@@ -198,6 +218,13 @@ python scripts/run.py --method vanilla_null --seed 1000                    # nul
 python scripts/smoke_all.py                                                # every method, one table
 python scripts/make_clusters.py                                            # once, for bv_blend
 python scripts/aggregate.py                                                # all results -> table + test
+
+python scripts/tune.py plan                       # the tuning trials (8 per method), nothing runs
+python scripts/tune.py run --methods dapo         # run that method's unfinished trials (validation only)
+python scripts/tune.py collect                    # best trial per method -> configs/tuned.yaml (commit it)
+python scripts/grid.py status                     # every block: done / stale / running / to do
+python scripts/grid.py worker --block gate1       # run a block's pending jobs (HPC: hpc/grid_worker.pbs)
+python scripts/figures.py                         # results/ -> results/figures/ (PDF, PNG, CSV, tables)
 ```
 A run writes `results/<method>/g<G>/seed<k>-<time>/`: `config.yaml` (resolved), `meta.json` (seed,
 git commit, dirty flag, GPU, dtype, splits), `train.jsonl` (one line per step), `eval.jsonl`,
@@ -226,13 +253,17 @@ Each step has a "done when". Do not skip ahead: every later number depends on th
    (expectation from 2610.04928: zero-shot leaves small models near 0%, so 3-shot). Record it in the
    decision log; tick the open question. Done when `prompt.shots` is final.
 4. **Timing run.** One full `vanilla` run, evaluation included, ON THE GPU TYPE USED FOR EVERYTHING.
-   Fill `docs/compute.md`: minutes per run x about 470 runs x 2 (tuning, re-runs). Set
+   Fill `docs/compute.md` from `python scripts/compute_report.py` (measured minutes per run -> GPU-hours
+   for every block and the tuning sweep, x 2 for re-runs). Set
    `budget.rollouts_per_step` and `budget.total_rollouts` (remove PROVISIONAL). Done when the grid's
    GPU-hours are known and fit the HPC share, or the grid is cut in the plan's order (section 9).
-5. **HPC access.** IIT Delhi HPC, A100-class, bf16, one GPU type for all benchmark runs. Re-run
-   `tests/test_against_trl.py` there (Triton kernel). Done when it passes on the cluster.
+5. **HPC access.** IIT Delhi HPC, A100-class, bf16, one GPU type for all benchmark runs. On the login
+   node: `bash hpc/setup_offline.sh` (venv, pinned versions, models and GSM8K into the cache, tests;
+   compute nodes have no internet). Then on a GPU node re-run `tests/test_against_trl.py` (Triton
+   kernel). Done when it passes on the cluster.
 6. **Gate 1.** `vanilla` at G 8, 10 seeds, against the base model (`--eval-only`: greedy decoding is
-   deterministic, so one base run is enough). Done when the gap between them is clearly bigger than
+   deterministic, so one base run is enough). `qsub -P <project> -v BLOCK=gate1,MINUTES=<from compute.md>
+   hpc/grid_worker.pbs`, then `python scripts/aggregate.py --results results_gate1`. Done when the gap between them is clearly bigger than
    vanilla's seed spread. If not: check the prompt and the parser, then consider 1.5B
    as the primary model. Do not run any other method before Gate 1 passes.
 7. **Freeze.** After Gate 1, `configs/base.yaml` is frozen. Any later change means re-running
@@ -241,12 +272,17 @@ Each step has a "done when". Do not skip ahead: every later number depends on th
    answers it; follow up once after a week). MC-GRPO first (is +-1000 on 0/1 rewards intended?).
 9. **Human re-read of Tier 2 papers** against `docs/method-specs-tier2.md` (the agents could only use a
    web-fetch tool). LENS section 5.1 first.
-10. **Tuning sweep.** Write `scripts/tune.py` (section 10). Same number of trials for every method,
-    vanilla included, on VALIDATION only: learning rate for all, plus tau (softmax_grpo), c (corpo),
-    eta (ha_dw), T (bv_blend). KRPO and MC-GRPO need much smaller lrs; Dr. GRPO and RLOO much larger.
-    Record the budget (it goes in the paper).
+10. **Tuning sweep.** `scripts/tune.py` with `configs/tuning.yaml`: 8 trials per method, vanilla
+    included, on VALIDATION only: lr for all (one per stratum of 1e-6 to 1e-4, log scale), plus tau
+    (softmax_grpo), c (corpo), eta (ha_dw), T (bv_blend). First set the trial length in
+    `configs/tuning.yaml` from the timing run. `tune.py run` per method (one HPC job each), then
+    `tune.py collect` -> `configs/tuned.yaml`; commit it. If `collect` warns that a chosen lr is at the
+    edge of its range (likely for KRPO and MC-GRPO, maybe Dr. GRPO and RLOO), widen that method's range
+    in `lr_ranges` and re-run its whole sweep (decision log). The budget goes in the paper.
 11. **Main grid.** Tier 1 at G 4, 8, 16 x 10 seeds (2-GRPO at G 2), plus `vanilla_null` (seeds
-    1000-1009) and the base model. Then `scripts/aggregate.py`. Check the null-control exclusion rate
+    1000-1009) and the base model: blocks `tier1` and `null_control` of `configs/grid.yaml` (281 + 10 jobs;
+    G 8 comes first, so the falsification test can be read early). Several `hpc/grid_worker.pbs` jobs
+    can work on one block at once. Then `scripts/aggregate.py` and `scripts/figures.py`. Check the null-control exclusion rate
     is about 5% before believing anything else.
 12. **Gate 2.** Look at the results once. Apply the falsification rule exactly as written. Decide the
     paper's story. Then the 1.5B check (Tier 1, G 8), then Tier 2 (G 8) or the optional build phase.
@@ -279,13 +315,13 @@ Each step has a "done when". Do not skip ahead: every later number depends on th
 
 ## 10. Code still to write
 
-| What | Spec |
+| What | Status |
 |---|---|
-| `scripts/tune.py` | For each method: N trials (same N for all) over a fixed grid or random search of lr and the method's own params, short runs, scored on VALIDATION accuracy only. Writes the chosen values to a file the grid reads. Must never touch the test split |
-| pass@k | Sample k = 16 completions per test problem at temperature 1, report pass@1/4/16 with the unbiased estimator. Add to `src/eval/` and to `summary.json`; extend `aggregate.py` |
-| HPC job scripts | One job per (method, G, seed); resumable; writes into `results/`; refuses to run from a dirty tree |
-| Figures | `scripts/figures.py`: regenerate every figure from `results/` with one command |
-| Optional | Checkpoint/resume mid-run (advantage `state` is already plain numbers/lists/tensors so it can be saved) |
+| `scripts/tune.py` | DONE 8 Nov. Stratified log-lr search, equal trials, validation only, `configs/tuned.yaml` |
+| pass@k | DONE 8 Nov. `src/eval/passk.py`, in `summary.json` (`passk`), in `aggregate.py` as a secondary table |
+| HPC job scripts | DONE 8 Nov. `scripts/grid.py` + `hpc/`. Resumable, claims, refuses a dirty tree or an uncommitted `tuned.yaml` |
+| Figures | DONE 8 Nov. `scripts/figures.py`: figures 1-4 and tables 1-2 from `results/` with one command |
+| Optional | Checkpoint/resume mid-run (advantage `state` is already plain numbers/lists/tensors so it can be saved). A run killed by the walltime is simply re-run by the grid |
 
 Each new piece gets tests on the tiny model, like the existing ones.
 

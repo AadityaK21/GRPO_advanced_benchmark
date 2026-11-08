@@ -13,7 +13,7 @@ cd C:\GRPO
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-pip install torch gymnasium numpy pytest transformers==5.19.0 trl==1.15.0 datasets
+pip install torch gymnasium numpy pytest transformers==5.19.0 trl==1.15.0 datasets peft pyyaml scikit-learn matplotlib scipy
 ```
 
 Python 3.11 or newer (TRL 1.15 needs 3.11). If PowerShell refuses to run `Activate.ps1`, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once, then activate again. Activate the environment each time you open a new terminal.
