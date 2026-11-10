@@ -79,4 +79,14 @@ Commit before a benchmark run: a run from a tree with uncommitted changes is fla
 
 ## License
 
-MIT. See `LICENSE`.
+- **Code**: your choice of the MIT License (`LICENSE-MIT`) or the Apache License 2.0
+  (`LICENSE-APACHE`). Apache 2.0 adds an explicit patent grant; MIT is shorter. Either way, keep the
+  copyright notice. See `NOTICE`.
+- **Docs, figures and result tables** (`docs/`, `results/**/figures/`, `results/aggregate.*`):
+  Creative Commons Attribution 4.0 (`LICENSE-DOCS`). Reuse them with credit.
+- **Models, data and libraries** this code downloads or imports keep their own licenses
+  (Qwen2.5: Apache-2.0, GSM8K: MIT, and more): see `THIRD_PARTY_LICENSES.md`.
+
+## Citation
+
+If you use this code, please cite it: GitHub's "Cite this repository" button reads `CITATION.cff`.

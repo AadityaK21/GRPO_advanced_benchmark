@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite it as below."
+title: "GRPO Advanced Benchmark: published GRPO advantage estimators, compared under matched conditions"
+type: software
+authors:
+  - family-names: Kumawat
+    given-names: Aaditya
+    affiliation: "Indian Institute of Technology Delhi"
+repository-code: "https://github.com/AadityaK21/GRPO_advanced_benchmark"
+license:
+  - MIT
+  - Apache-2.0
+version: 0.1.0
+keywords:
+  - reinforcement learning
+  - GRPO
+  - large language models
+  - benchmark
+  - GSM8K

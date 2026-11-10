@@ -3,7 +3,8 @@ name = "grpo-advanced-benchmark"
 version = "0.1.0"
 description = "Published GRPO advantage estimators, compared under matched conditions"
 requires-python = ">=3.11"
-license = "MIT"
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-MIT", "LICENSE-APACHE", "NOTICE"]
 # Pinned: TRL's internals change between releases, so the TRL check holds only for these versions.
 dependencies = [
     "torch==2.14.1",
