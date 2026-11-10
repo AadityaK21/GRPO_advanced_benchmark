@@ -76,3 +76,7 @@ Commit before a benchmark run: a run from a tree with uncommitted changes is fla
 - `docs/implementation-notes.md`: every choice a paper leaves open, and the verification log.
   `docs/compute.md`: measured time per run and the grid that fits.
 - `warmup/`: REINFORCE and PPO from scratch (weeks 1–4). Each has its own tests.
+
+## License
+
+MIT. See `LICENSE`.
