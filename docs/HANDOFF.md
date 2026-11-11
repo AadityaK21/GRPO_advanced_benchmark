@@ -55,8 +55,8 @@ expected outcome is honest either way: a practical guide if some methods really 
 
 **Not done yet (in the order it should happen: see section 8)**
 
-1. Smoke-test all 16 methods on a real GPU (`notebooks/kaggle_smoke_all.ipynb`). Ran 11 Nov on a Kaggle
-   T4 after removing Kaggle's old torchao (now in the notebook); waiting for the final table.
+1. ~~Smoke-test all 16 methods on a real GPU~~ DONE 11 Nov: all 17 configs pass on a Kaggle T4
+   (verification log).
 2. ~~Make the BV-Blend cluster file~~ DONE 11 Nov, committed (`data/gsm8k_train_clusters_k16.json`).
 3. ~~The prompt check~~ DONE 11 Nov: 3-shot is final (0.596 vs 0.550 zero-shot on validation; decision log).
 4. The timing run (one full vanilla run, evaluation included) and the compute budget in `docs/compute.md`.
