@@ -55,11 +55,10 @@ expected outcome is honest either way: a practical guide if some methods really 
 
 **Not done yet (in the order it should happen: see section 8)**
 
-1. Smoke-test all 16 methods on a real GPU (`notebooks/kaggle_smoke_all.ipynb`). Never run yet.
-2. Make the BV-Blend cluster file (`scripts/make_clusters.py`) and commit it.
-3. The prompt check: zero-shot vs 3-shot base accuracy and format rate. A Kaggle attempt hung with GPU
-   at 0% and was abandoned; never completed. Since 28 Oct a run prints its device and GPU first, then a
-   line per evaluation batch, so a stuck run shows where it stopped (no GPU visible = a WARNING line).
+1. Smoke-test all 16 methods on a real GPU (`notebooks/kaggle_smoke_all.ipynb`). Ran 11 Nov on a Kaggle
+   T4 after removing Kaggle's old torchao (now in the notebook); waiting for the final table.
+2. ~~Make the BV-Blend cluster file~~ DONE 11 Nov, committed (`data/gsm8k_train_clusters_k16.json`).
+3. ~~The prompt check~~ DONE 11 Nov: 3-shot is final (0.596 vs 0.550 zero-shot on validation; decision log).
 4. The timing run (one full vanilla run, evaluation included) and the compute budget in `docs/compute.md`.
 5. IIT Delhi HPC access (A100-class GPUs, bf16). Not requested/confirmed yet.
 6. Gate 1: vanilla (10 seeds) vs the base model.
@@ -150,7 +149,7 @@ results/, runs/           Run outputs (git-ignored)
 | dtype | `auto`: bf16 where native, else fp32 | Kaggle T4 = fp32 = development only. All benchmark runs must share one GPU type and dtype |
 | Optimiser | AdamW, lr 1e-5 PROVISIONAL, linear decay to 0, no warmup, grad clip 1.0 | Each method's lr comes from the tuning sweep |
 | Data | GSM8K train shuffled with split_seed 1234: first 500 = validation, next 3 = few-shot examples, rest (6,970) = training pool. Test = all 1,319 | The run seed never touches the split |
-| Prompt | 3-shot chat turns + instruction `Let's think step by step and output the final answer after "####".` | PROVISIONAL until the prompt check |
+| Prompt | 3-shot chat turns + instruction `Let's think step by step and output the final answer after "####".` | Final: the prompt check (11 Nov) measured 3-shot 0.596 vs zero-shot 0.550 on validation, paired CI [+0.002, +0.090] |
 | Sampling | temperature 1.0, max 512 new tokens, no top-k/top-p | log-probs assume exactly this distribution |
 | Reward | 1 if the parsed number equals the reference, else 0. Truncated (no EOS by 512 tokens) = 0 | Dr. GRPO's code does the same |
 | Budget | 64 rollouts per step (prompts per step = 64 // G), 12,800 per run = 200 steps at G 8. PROVISIONAL | Fixed ROLLOUTS, not steps. Extra rollouts (MC-GRPO) and refills (DAPO) count |

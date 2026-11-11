@@ -34,7 +34,8 @@ data:
                                # methods that need it (BV-Blend). Made once by scripts/make_clusters.py
 
 prompt:
-  shots: 3                     # fixed worked examples from the train split, as earlier chat turns
+  shots: 3                     # fixed worked examples from the train split, as earlier chat turns.
+                               # Final since the prompt check (11 Nov 2026, decision log)
   instruction: Let's think step by step and output the final answer after "####".
 
 sampling:

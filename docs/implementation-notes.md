@@ -119,6 +119,8 @@ Evidence that the shared loop is a correct GRPO. Newest first.
 
 | Date | Check | Result |
 |---|---|---|
+| 2026-11-11 | Prompt check on a Kaggle T4 (fp32; torch 2.11, transformers 5.20, not the pinned versions): the base model, greedy, the 500 validation problems, 3-shot vs zero-shot (`--eval-only --val-only`) | 3-shot 0.596, `####` in 45% of answers, median 527 characters, 13.9 min. Zero-shot 0.550, `####` 3%, `\boxed{}` 50%, median 915 characters, 7.4 min. Paired difference +0.046, 95% bootstrap CI [+0.002, +0.090] (74 problems only 3-shot gets right, 51 only zero-shot). Parser read by eye on zero-shot answers: takes the model's final number correctly, including `\boxed{10}` |
+| 2026-11-11 | Clusters for BV-Blend (`scripts/make_clusters.py`, Kaggle T4) | 7,473 training questions into 16 clusters, sizes 203 to 954; committed as `data/gsm8k_train_clusters_k16.json` |
 | 2026-10-19 | Chunked log-probs on the GPU: our loop vs TRL 1.15.0, same setting as the 100-step match below, 20 steps, Kaggle T4 | Identical reward and completion length on 20 of 20 steps. Peak GPU memory 3.19 GB (was 11.7 GB; TRL 3.2 GB) |
 | 2026-10-19 | `scripts/run.py --smoke` on a Kaggle T4: 3-shot prompt, 2 steps of 16 completions, validation and test on 16 problems each | Runs end to end in 1.6 min, peak 3.1 GB, writes config, meta, train/eval logs and summary |
 | 2026-10-19 | Chunked log-probs (`src/train/logprobs.py`, 256 tokens per piece) against all-at-once, `tests/test_logprobs.py` | Same log-probs and gradients (1e-5), also with gradient checkpointing and with LoRA's adapter-off reference. CPU memory for 8 × 512 tokens at a 50k vocabulary: 3.9 GB → 0.35 GB |
@@ -135,6 +137,7 @@ Newest first. One line for every decision that could change a number.
 
 | Date | Method | Decision | Why | Re-run needed? |
 |---|---|---|---|---|
+| 2026-11-11 | all | `prompt.shots` = 3 is final | On validation only: 3-shot beats zero-shot by 4.6 points with a paired 95% CI above 0 ([+0.2, +9.0]). Its answers are GSM8K-style and half as long, so the parser reads them the way it was written to; zero-shot answers are LaTeX with `\boxed{}` half the time and depend on the last-number fallback. 2610.04928's "zero-shot near 0%" did not hold here (our parser falls back to the last number), so the decision rests on the measured gap. Cost: about 1.9x zero-shot's evaluation time on a T4; the timing run measures the training cost | No: no benchmark run yet |
 | 2026-11-08 | all | Tuning trials are filed under a fingerprint of their whole resolved config, so changed settings (a wider lr range, another trial length, a base.yaml change) never reuse old trial scores; `collect --allow-incomplete` never writes `configs/tuned.yaml`, and the grid refuses a method tuned on fewer trials | An independent code review found both holes (old scores paired with new lrs; unequal budgets reaching the grid) | No |
 | 2026-11-08 | all | pass@k runs after `summary.json` is written (`passk_status` pending, then done), on the final weights restored from memory | A crash or walltime kill during its ~21k samples must not lose the finished run | No |
 | 2026-11-08 | DAPO | Its collapse rate in figure 3 and table 1 is dropped groups / all sampled groups (skipped steps included), not the logged `uniform_frac`, which is over the kept (mixed) groups and so always 0 | Found by the code review | No |
@@ -167,7 +170,7 @@ Newest first. One line for every decision that could change a number.
 
 ## Open questions
 
-- [ ] Prompt: zero-shot or 3-shot? Measure base validation accuracy and format rate both ways (`--eval-only`), then decide. See method-specs.md
+- [x] Prompt: zero-shot or 3-shot? Decided 11 Nov 2026: 3-shot (decision log, verification log). Measure base validation accuracy and format rate both ways (`--eval-only`), then decide. See method-specs.md
 - [ ] Budget: rollouts per step (proposal 256) and total, from the timing run
 - [ ] CoRPO's threshold c under 0/1 rewards (paper used 0, which equals Dr. GRPO's advantage). Proposal: tune c in {0.25, 0.5, 0.75} on validation
 - [ ] MC-GRPO under 0/1 rewards: MAD is always 0, so A = +-1/eps on minority completions only. Email the author: is that intended, and what eps? (Paper silent; code 1e-3)
